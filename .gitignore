@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vite/
+*.local
+*.log
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+dashboard-mobile-preview*.png
+bridge/dashboard-snapshot.json
+bridge/codex-commands.json
+bridge/reflection-analysis-request.json
+bridge/reflection-analysis-response.json
+bridge/archive/
+backups/

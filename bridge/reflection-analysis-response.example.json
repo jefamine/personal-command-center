@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 3,
+  "response": {
+    "entryId": "replace-with-entry-id",
+    "requestId": "replace-with-request-id",
+    "requestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceUpdatedAt": "2026-07-15T06:00:00.000Z",
+    "analysis": {
+      "responseId": "replace-with-unique-response-id",
+      "requestId": "replace-with-request-id",
+      "understanding": "Кратко и точно сформулируйте, что занимает человека в этой записи.",
+      "observations": [
+        "Отделите непосредственно написанные факты от интерпретации.",
+        "Укажите не более пяти действительно существенных наблюдений."
+      ],
+      "possibleExplanation": "Предложите возможное системное объяснение как гипотезу, а не как установленный факт.",
+      "alternatives": [
+        "Назовите до трёх правдоподобных альтернативных объяснений."
+      ],
+      "question": "Задайте не более одного вопроса, если ответ действительно различит гипотезы.",
+      "proposedAction": "Предложите один небольшой, конкретный и обратимый следующий шаг.",
+      "source": "codex",
+      "generatedAt": "2026-07-15T06:05:00.000Z"
+    }
+  }
+}

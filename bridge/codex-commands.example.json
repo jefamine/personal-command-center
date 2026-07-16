@@ -1,0 +1,33 @@
+[
+  {
+    "id": "example-task-1",
+    "type": "add_task",
+    "payload": {
+      "title": "Разобрать подборку Codex",
+      "status": "inbox",
+      "priority": 3,
+      "estimateMinutes": 25,
+      "notes": "Добавлено через локальный мост."
+    }
+  },
+  {
+    "id": "example-note-1",
+    "type": "add_note",
+    "payload": {
+      "title": "Материалы от Codex",
+      "body": "# Подборка\n\nСюда можно положить результаты ежедневной работы.",
+      "tags": ["codex", "подборка"]
+    }
+  },
+  {
+    "id": "example-reading-1",
+    "type": "add_reading",
+    "payload": {
+      "title": "Новый материал для чтения",
+      "summary": "Краткое объяснение, почему материал стоит открыть.",
+      "url": "https://example.com",
+      "source": "Подборка Codex",
+      "tags": ["чтение"]
+    }
+  }
+]
