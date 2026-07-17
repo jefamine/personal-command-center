@@ -2,6 +2,7 @@ import type {
   CodexSnapshotScope,
   DashboardState
 } from "../types";
+import { reflectionDocuments } from "../domain/reflections/reflectionNote";
 import { safeExternalUrl } from "./url";
 
 const SAFE_DEFAULT_SCOPE: CodexSnapshotScope = {
@@ -27,9 +28,8 @@ function normalizedScope(state: DashboardState): CodexSnapshotScope {
 
 export function buildCodexSnapshot(state: DashboardState) {
   const scope = normalizedScope(state);
-  const reflectionNoteIds = new Set(
-    state.reflections.map((entry) => entry.noteId).filter((id): id is string => Boolean(id))
-  );
+  const reflections = reflectionDocuments(state.notes);
+  const reflectionNoteIds = new Set(reflections.map((entry) => entry.id));
   return {
     schemaVersion: 2 as const,
     writtenAt: new Date().toISOString(),
@@ -97,14 +97,14 @@ export function buildCodexSnapshot(state: DashboardState) {
           }))
         : [],
       journal: scope.journal
-        ? state.reflections.map((entry) => ({
+        ? reflections.map((entry) => ({
             id: entry.id,
-            text: entry.originalText,
-            status: entry.status,
-            correction: entry.correction,
+            text: entry.body,
+            status: entry.reflection.status,
+            correction: entry.reflection.correction,
             createdAt: entry.createdAt,
             updatedAt: entry.updatedAt,
-            confirmedAt: entry.confirmedAt
+            confirmedAt: entry.reflection.confirmedAt
           }))
         : [],
       readingItems: scope.reading

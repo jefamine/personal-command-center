@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ReflectionEntry } from "../../types";
+import type { ReflectionDocument, ReflectionStatus } from "../../types";
+import { createReflectionNote } from "./reflectionNote";
 import {
   hasStoredReflectionResponse,
   type PendingReflectionAcknowledgement
@@ -13,38 +14,40 @@ const pending: PendingReflectionAcknowledgement = {
   sourceUpdatedAt: "2026-07-15T10:00:00.000Z"
 };
 
-function entry(status: ReflectionEntry["status"]): ReflectionEntry {
+function entry(status: ReflectionStatus): ReflectionDocument {
+  const document = createReflectionNote(
+    "Текст",
+    "reflection-1",
+    "2026-07-15T10:00:00.000Z"
+  );
   return {
-    id: "reflection-1",
-    noteId: "reflection-note-reflection-1",
-    originalText: "Текст",
-    status,
-    analysis: {
-      responseId: "response-1",
-      requestId: "request-1",
-      understanding: "Понимание",
-      observations: [],
-      possibleExplanation: "Смысл",
-      alternatives: [],
-      question: "Вопрос?",
-      proposedAction: "Шаг",
-      source: "codex",
-      generatedAt: "2026-07-15T10:02:00.000Z"
+    ...document,
+    reflection: {
+      ...document.reflection,
+      status,
+      analysis: {
+        responseId: "response-1",
+        requestId: "request-1",
+        understanding: "Понимание",
+        observations: [],
+        possibleExplanation: "Смысл",
+        alternatives: [],
+        question: "Вопрос?",
+        proposedAction: "Шаг",
+        source: "codex",
+        generatedAt: "2026-07-15T10:02:00.000Z"
+      },
+      correction: status === "corrected" ? "Поправка" : null,
+      analysisRequestId: "request-1",
+      analysisRequestDigest: "digest-1",
+      analysisRequestedAt: "2026-07-15T10:01:00.000Z",
+      analysisSourceUpdatedAt: "2026-07-15T10:00:00.000Z",
+      analysisSourceText: "Текст",
+      confirmedAt: status === "confirmed" || status === "corrected"
+        ? "2026-07-15T10:03:00.000Z"
+        : null
     },
-    correction: status === "corrected" ? "Поправка" : null,
-    analysisRequestId: "request-1",
-    analysisRequestDigest: "digest-1",
-    analysisRequestedAt: "2026-07-15T10:01:00.000Z",
-    analysisSourceUpdatedAt: "2026-07-15T10:00:00.000Z",
-    analysisContextSections: [],
-    analysisProfileUpdatedAt: null,
-    analysisMemoryRefs: [],
-    suggestions: [],
-    createdAt: "2026-07-15T10:00:00.000Z",
-    updatedAt: "2026-07-15T10:03:00.000Z",
-    confirmedAt: status === "confirmed" || status === "corrected"
-      ? "2026-07-15T10:03:00.000Z"
-      : null
+    updatedAt: "2026-07-15T10:03:00.000Z"
   };
 }
 

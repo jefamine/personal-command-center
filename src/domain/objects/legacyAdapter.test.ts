@@ -32,6 +32,8 @@ describe("адаптер старых данных", () => {
       projectId: null,
       tags: [],
       pinned: false,
+      contentUpdatedAt: state.updatedAt,
+      reflection: null,
       createdAt: state.updatedAt,
       updatedAt: state.updatedAt
     });
@@ -71,4 +73,3 @@ describe("адаптер старых данных", () => {
     expect(parseLegacyObjectReference(reference)).toEqual({ type: "task", rawId: "задача/1: тест" });
   });
 });
-

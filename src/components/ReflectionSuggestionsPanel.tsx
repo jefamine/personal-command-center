@@ -14,10 +14,10 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useDashboard } from "../state/DashboardContext";
-import type { ReflectionEntry, ReflectionSuggestion } from "../types";
+import type { ReflectionDocument, ReflectionSuggestion } from "../types";
 
 interface ReflectionSuggestionsPanelProps {
-  entry: ReflectionEntry;
+  entry: ReflectionDocument;
 }
 
 const SUGGESTION_COPY: Record<ReflectionSuggestion["kind"], { label: string; icon: typeof Lightbulb }> = {
@@ -46,7 +46,7 @@ export function ReflectionSuggestionsPanel({ entry }: ReflectionSuggestionsPanel
     addReflectionSuggestionToNote,
     createTaskFromReflectionSuggestion
   } = useDashboard();
-  const suggestions = entry.suggestions ?? [];
+  const suggestions = entry.reflection.suggestions;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [message, setMessage] = useState("");
@@ -123,8 +123,8 @@ export function ReflectionSuggestionsPanel({ entry }: ReflectionSuggestionsPanel
   const addToNote = (suggestion: ReflectionSuggestion) => {
     const note = addReflectionSuggestionToNote(entry.id, suggestion.id);
     setMessage(note
-      ? "Предложение добавлено в локальную заметку. Файл Obsidian пока не изменён."
-      : "Не удалось добавить предложение в заметку. Проверьте, что оно принято."
+      ? "Предложение добавлено в этот документ. Файл Obsidian пока не изменён."
+      : "Не удалось добавить предложение в документ. Проверьте, что оно принято."
     );
     focusCard(suggestion.id);
   };
@@ -152,12 +152,8 @@ export function ReflectionSuggestionsPanel({ entry }: ReflectionSuggestionsPanel
           const SuggestionIcon = copy.icon;
           const editing = editingId === suggestion.id;
           const editedByUser = suggestion.text !== suggestion.sourceText;
-          const linkedNoteExists = Boolean(
-            suggestion.addedToNoteAt &&
-            entry.noteId &&
-            state.notes.some((note) => note.id === entry.noteId)
-          );
-          const noteWasDeleted = Boolean(suggestion.addedToNoteAt && !linkedNoteExists);
+          const linkedNoteExists = Boolean(suggestion.addedToNoteAt);
+          const noteWasDeleted = false;
           const linkedTask = suggestion.createdTaskId
             ? state.tasks.find((task) => task.id === suggestion.createdTaskId) ?? null
             : null;
@@ -215,9 +211,7 @@ export function ReflectionSuggestionsPanel({ entry }: ReflectionSuggestionsPanel
                     ? taskWasDeleted
                       ? "Связанная задача удалена. Верните и примите предложение, чтобы создать её снова."
                       : "Созданная ранее задача останется без изменений."
-                    : noteWasDeleted
-                      ? "Связанная заметка удалена. Верните и примите предложение, чтобы создать её снова."
-                      : "Добавленная ранее заметка останется без изменений."}
+                      : "Добавленный ранее фрагмент документа останется без изменений."}
                 </p>
               ) : null}
 
@@ -241,9 +235,9 @@ export function ReflectionSuggestionsPanel({ entry }: ReflectionSuggestionsPanel
                       <div>
                         {noteWasDeleted ? <AlertCircle size={18} /> : <NotebookPen size={18} />}
                         <span>
-                          <strong>{noteWasDeleted ? "Связанная заметка удалена" : linkedNoteExists ? "Добавлено в заметку" : "Можно добавить в заметку"}</strong>
+                          <strong>{linkedNoteExists ? "Добавлено в документ" : "Можно добавить в документ"}</strong>
                           <small>{linkedNoteExists
-                            ? "Файл Obsidian изменится только при следующем экспорте. Дальнейшие изменения предложения не меняют заметку автоматически."
+                            ? "Файл Obsidian изменится только при следующем экспорте. Дальнейшие изменения предложения не меняют добавленный фрагмент автоматически."
                             : "Файл Obsidian изменится только при следующем экспорте."}</small>
                         </span>
                       </div>
@@ -254,7 +248,7 @@ export function ReflectionSuggestionsPanel({ entry }: ReflectionSuggestionsPanel
                         onClick={() => addToNote(suggestion)}
                       >
                         {linkedNoteExists ? <Check size={16} /> : <Plus size={16} />}
-                        {linkedNoteExists ? "В заметке" : noteWasDeleted ? "Создать заметку снова" : "Добавить в заметку"}
+                        {linkedNoteExists ? "В документе" : "Добавить в документ"}
                       </button>
                     </div>
                   ) : (

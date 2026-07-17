@@ -1,12 +1,11 @@
-import type { Note, ReflectionEntry } from "../../types";
+import type {
+  Note,
+  ReflectionDocument,
+  ReflectionMetadata
+} from "../../types";
 
 const MAX_TITLE_LENGTH = 72;
-const REFLECTION_TAG = "осмысление";
-
-type ReflectionNoteSource = Pick<
-  ReflectionEntry,
-  "id" | "noteId" | "originalText" | "createdAt"
->;
+export const REFLECTION_TAG = "осмысление";
 
 function formatReflectionDate(createdAt: string): string {
   const isoDate = /^(\d{4})-(\d{2})-(\d{2})/.exec(createdAt);
@@ -28,46 +27,78 @@ function truncateTitle(value: string): string {
   return `${readableCut.trimEnd()}…`;
 }
 
-/** Builds a compact title without changing the source reflection text. */
+/** Builds a compact default title without creating a second copy of the document body. */
 export function buildReflectionNoteTitle(
-  entry: Pick<ReflectionEntry, "originalText" | "createdAt">
+  document: Pick<Note, "body" | "createdAt">
 ): string {
-  const firstMeaningfulLine = entry.originalText
+  const firstMeaningfulLine = document.body
     .split(/\r?\n/u)
     .map((line) => line.trim().replace(/\s+/gu, " "))
     .find(Boolean);
 
   if (firstMeaningfulLine) return truncateTitle(`Осмысление: ${firstMeaningfulLine}`);
 
-  const date = formatReflectionDate(entry.createdAt);
+  const date = formatReflectionDate(document.createdAt);
   return date ? `Осмысление · ${date}` : "Осмысление";
 }
 
-/**
- * Creates the note representation of a reflection.
- * A deterministic fallback id keeps repeated projections of the same entry stable.
- */
-export function createReflectionNote(entry: ReflectionNoteSource, noteId?: string): Note {
-  const id = noteId ?? entry.noteId ?? `reflection-note-${entry.id}`;
-
+export function createReflectionMetadata(): ReflectionMetadata {
   return {
+    status: "captured",
+    analysis: null,
+    correction: null,
+    analysisRequestId: null,
+    analysisRequestDigest: null,
+    analysisRequestedAt: null,
+    analysisSourceUpdatedAt: null,
+    analysisSourceText: null,
+    analysisContextSections: [],
+    analysisProfileUpdatedAt: null,
+    analysisMemoryRefs: [],
+    suggestions: [],
+    confirmedAt: null
+  };
+}
+
+/** Creates one canonical document that can be shown in the “Осмысление” view. */
+export function createReflectionNote(text: string, id: string, createdAt: string): ReflectionDocument {
+  const document: Note = {
     id,
-    title: buildReflectionNoteTitle(entry),
-    body: entry.originalText,
+    title: "",
+    body: text,
     projectId: null,
     tags: [REFLECTION_TAG],
     pinned: false,
     origin: "reflection",
-    createdAt: entry.createdAt,
-    updatedAt: entry.createdAt
+    contentUpdatedAt: createdAt,
+    reflection: createReflectionMetadata(),
+    createdAt,
+    updatedAt: createdAt
+  };
+  return {
+    ...document,
+    title: buildReflectionNoteTitle(document),
+    reflection: document.reflection!
   };
 }
 
-/** Checks the stored link and, when notes are supplied, that its target still exists. */
-export function hasLinkedReflectionNote(
-  entry: Pick<ReflectionEntry, "noteId">,
-  notes?: readonly Pick<Note, "id">[]
-): boolean {
-  if (!entry.noteId) return false;
-  return notes ? notes.some((note) => note.id === entry.noteId) : true;
+export function isReflectionDocument(note: Note): note is ReflectionDocument {
+  return note.reflection !== null;
+}
+
+export function reflectionDocuments(notes: readonly Note[]): ReflectionDocument[] {
+  return notes
+    .filter((note) =>
+      isReflectionDocument(note) ||
+      note.origin === "reflection" ||
+      note.tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === REFLECTION_TAG)
+    )
+    .map((note) => note.reflection
+      ? note as ReflectionDocument
+      : { ...note, reflection: createReflectionMetadata() }
+    );
+}
+
+export function reflectionContentUpdatedAt(note: Pick<Note, "contentUpdatedAt" | "updatedAt">): string {
+  return note.contentUpdatedAt || note.updatedAt;
 }

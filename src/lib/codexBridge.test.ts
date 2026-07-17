@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../data/seed";
+import { createReflectionNote } from "../domain/reflections/reflectionNote";
 import type { CalendarEvent, Note } from "../types";
 import { buildCodexSnapshot } from "./codexBridge";
 
@@ -14,6 +15,8 @@ describe("buildCodexSnapshot", () => {
       projectId: null,
       tags: ["личное"],
       pinned: false,
+      contentUpdatedAt: now,
+      reflection: null,
       createdAt: now,
       updatedAt: now
     };
@@ -55,25 +58,7 @@ describe("buildCodexSnapshot", () => {
       createdAt: now,
       updatedAt: now
     }];
-    state.reflections = [{
-      id: "private-reflection",
-      noteId: "private-reflection-note",
-      originalText: "SECRET_REFLECTION",
-      status: "captured",
-      analysis: null,
-      correction: null,
-      analysisRequestId: null,
-      analysisRequestDigest: null,
-      analysisRequestedAt: null,
-      analysisSourceUpdatedAt: null,
-      analysisContextSections: [],
-      analysisProfileUpdatedAt: null,
-      analysisMemoryRefs: [],
-      suggestions: [],
-      createdAt: now,
-      updatedAt: now,
-      confirmedAt: null
-    }];
+    state.notes.push(createReflectionNote("SECRET_REFLECTION", "private-reflection", now));
     state.integrations.codex.snapshotScope = {
       tasks: true,
       projects: true,
@@ -125,6 +110,8 @@ describe("buildCodexSnapshot", () => {
       projectId: null,
       tags: [],
       pinned: false,
+      contentUpdatedAt: now,
+      reflection: null,
       createdAt: now,
       updatedAt: now
     }, {
@@ -134,6 +121,8 @@ describe("buildCodexSnapshot", () => {
       projectId: null,
       tags: ["осмысление"],
       pinned: false,
+      contentUpdatedAt: now,
+      reflection: null,
       createdAt: now,
       updatedAt: now
     }, {
@@ -143,6 +132,8 @@ describe("buildCodexSnapshot", () => {
       projectId: null,
       tags: ["Осмысление"],
       pinned: false,
+      contentUpdatedAt: now,
+      reflection: null,
       createdAt: now,
       updatedAt: now
     }, {
@@ -153,27 +144,10 @@ describe("buildCodexSnapshot", () => {
       tags: [],
       pinned: false,
       origin: "reflection",
+      contentUpdatedAt: now,
+      reflection: null,
       createdAt: now,
       updatedAt: now
-    }];
-    state.reflections = [{
-      id: "reflection-with-note",
-      noteId: "reflection-note",
-      originalText: "SECRET_REFLECTION_SOURCE",
-      status: "captured",
-      analysis: null,
-      correction: null,
-      analysisRequestId: null,
-      analysisRequestDigest: null,
-      analysisRequestedAt: null,
-      analysisSourceUpdatedAt: null,
-      analysisContextSections: [],
-      analysisProfileUpdatedAt: null,
-      analysisMemoryRefs: [],
-      suggestions: [],
-      createdAt: now,
-      updatedAt: now,
-      confirmedAt: null
     }];
     state.integrations.codex.snapshotScope = {
       tasks: false,
@@ -200,25 +174,9 @@ describe("buildCodexSnapshot", () => {
   it("передаёт дневник только после отдельного разрешения", () => {
     const state = createInitialState();
     const now = new Date().toISOString();
-    state.reflections = [{
-      id: "journal-entry",
-      noteId: "journal-note",
-      originalText: "Разрешённая запись дневника",
-      status: "captured",
-      analysis: null,
-      correction: null,
-      analysisRequestId: null,
-      analysisRequestDigest: null,
-      analysisRequestedAt: null,
-      analysisSourceUpdatedAt: null,
-      analysisContextSections: [],
-      analysisProfileUpdatedAt: null,
-      analysisMemoryRefs: [],
-      suggestions: [],
-      createdAt: now,
-      updatedAt: now,
-      confirmedAt: null
-    }];
+    state.notes = [
+      createReflectionNote("Разрешённая запись дневника", "journal-entry", now)
+    ];
 
     expect(buildCodexSnapshot(state).data.journal).toEqual([]);
     state.integrations.codex.snapshotScope.journal = true;

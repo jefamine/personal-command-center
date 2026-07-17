@@ -92,13 +92,12 @@ export function createInitialState(): DashboardState {
   ];
 
   return {
-    version: 14,
+    version: 15,
     tasks,
     projects: [project],
     lifeAreas: [lifeArea, ...createLifeAreaTemplates(now, 1)],
     events: [],
     notes: [],
-    reflections: [],
     assistantMemory: [],
     personalContext: createDefaultPersonalContext(),
     settings: createDefaultSettings(),

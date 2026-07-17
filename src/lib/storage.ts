@@ -12,7 +12,7 @@ import type {
   ObsidianIntegrationSettings,
   PersonalContextSectionId,
   ReflectionAnalysis,
-  ReflectionEntry,
+  ReflectionMetadata,
   ReflectionStatus,
   Task,
   TrashEntry
@@ -39,7 +39,7 @@ const DB_NAME = "personal-command-center";
 const DB_VERSION = 1;
 const STORE_NAME = "app";
 const STATE_KEY = "dashboard-state";
-const PRE_V14_SAFETY_KEY = "dashboard-state-before-v14";
+const PRE_V15_SAFETY_KEY = "dashboard-state-before-v15";
 const AUTO_BACKUP_INDEX_KEY = "dashboard-auto-backup-index";
 const AUTO_BACKUP_PREFIX = "dashboard-auto-backup:";
 const AUTO_BACKUP_INTERVAL_MS = 15 * 60 * 1000;
@@ -53,6 +53,32 @@ export interface AutomaticBackupSummary {
 
 type LegacyTask = Omit<Task, "recurrence" | "generatedFromTaskId"> &
   Partial<Pick<Task, "recurrence" | "generatedFromTaskId">>;
+type LegacyNote = Omit<Note, "contentUpdatedAt" | "reflection"> &
+  Partial<Pick<Note, "contentUpdatedAt" | "reflection">>;
+
+interface LegacyReflectionEntry {
+  id: string;
+  noteId: string | null;
+  originalText: string;
+  status: ReflectionStatus;
+  analysis: ReflectionAnalysis | null;
+  correction: string | null;
+  analysisRequestId: string | null;
+  analysisRequestDigest: string | null;
+  analysisRequestedAt: string | null;
+  analysisSourceUpdatedAt: string | null;
+  analysisContextSections: PersonalContextSectionId[];
+  analysisProfileUpdatedAt: string | null;
+  analysisMemoryRefs: ReflectionMetadata["analysisMemoryRefs"];
+  suggestions: ReflectionMetadata["suggestions"];
+  createdAt: string;
+  updatedAt: string;
+  confirmedAt: string | null;
+}
+
+type LegacyAssistantMemoryItem = Omit<AssistantMemoryItem, "sourceType"> & {
+  sourceType: "reflection" | "document" | "manual";
+};
 
 type AppearanceSettingKey =
   | "accentPreset"
@@ -74,7 +100,7 @@ interface LegacyDashboardState {
   projects: LegacyProjectWithOptionalAreaId[];
   lifeAreas?: unknown;
   events?: CalendarEvent[];
-  notes?: Note[];
+  notes?: LegacyNote[];
   settings: LegacyAppSettings;
   integrations?: {
     google?: Partial<GoogleIntegrationSettings>;
@@ -95,6 +121,20 @@ interface LegacyDashboardState {
   updatedAt: string;
 }
 
+interface DashboardStateV14 extends Omit<
+  DashboardState,
+  "version" | "notes" | "assistantMemory" | "trash" | "revisionHistory"
+> {
+  version: 14;
+  notes: LegacyNote[];
+  reflections: LegacyReflectionEntry[];
+  assistantMemory: LegacyAssistantMemoryItem[];
+  trash: unknown[];
+  revisionHistory: unknown[];
+}
+
+type MigrationCandidate = DashboardState | DashboardStateV14 | LegacyDashboardState;
+
 const reflectionStatuses: ReflectionStatus[] = [
   "captured",
   "queued",
@@ -112,8 +152,9 @@ const personalContextSections: PersonalContextSectionId[] = [
   "systemProfile"
 ];
 
-const assistantMemorySourceTypes: AssistantMemoryItem["sourceType"][] = [
+const legacyAssistantMemorySourceTypes: LegacyAssistantMemoryItem["sourceType"][] = [
   "reflection",
+  "document",
   "manual"
 ];
 const assistantMemoryStatuses: AssistantMemoryItem["status"][] = ["active", "paused"];
@@ -126,13 +167,13 @@ function isValidDateString(value: unknown): value is string {
   return isNonEmptyString(value) && Number.isFinite(Date.parse(value));
 }
 
-function normalizeAssistantMemoryItem(value: unknown): AssistantMemoryItem | null {
+function normalizeAssistantMemoryItem(value: unknown): LegacyAssistantMemoryItem | null {
   if (!value || typeof value !== "object") return null;
-  const item = value as Partial<AssistantMemoryItem>;
+  const item = value as Partial<LegacyAssistantMemoryItem>;
   if (
     !isNonEmptyString(item.id) ||
     !isNonEmptyString(item.text) ||
-    !assistantMemorySourceTypes.includes(item.sourceType as AssistantMemoryItem["sourceType"]) ||
+    !legacyAssistantMemorySourceTypes.includes(item.sourceType as LegacyAssistantMemoryItem["sourceType"]) ||
     !assistantMemoryStatuses.includes(item.status as AssistantMemoryItem["status"]) ||
     !isValidDateString(item.createdAt) ||
     !isValidDateString(item.updatedAt) ||
@@ -142,15 +183,17 @@ function normalizeAssistantMemoryItem(value: unknown): AssistantMemoryItem | nul
     return null;
   }
 
-  const sourceType = item.sourceType as AssistantMemoryItem["sourceType"];
-  if (sourceType === "reflection" && !isNonEmptyString(item.sourceId)) return null;
+  const sourceType = item.sourceType as LegacyAssistantMemoryItem["sourceType"];
+  if ((sourceType === "reflection" || sourceType === "document") && !isNonEmptyString(item.sourceId)) {
+    return null;
+  }
 
   return {
     id: item.id,
     text: item.text,
     sourceType,
-    sourceId: sourceType === "reflection" && isNonEmptyString(item.sourceId) ? item.sourceId : null,
-    sourceUpdatedAt: sourceType === "reflection" && isNonEmptyString(item.sourceUpdatedAt)
+    sourceId: sourceType !== "manual" && isNonEmptyString(item.sourceId) ? item.sourceId : null,
+    sourceUpdatedAt: sourceType !== "manual" && isNonEmptyString(item.sourceUpdatedAt)
       ? item.sourceUpdatedAt
       : null,
     status: item.status as AssistantMemoryItem["status"],
@@ -159,12 +202,12 @@ function normalizeAssistantMemoryItem(value: unknown): AssistantMemoryItem | nul
   };
 }
 
-function normalizeAssistantMemory(value: unknown): AssistantMemoryItem[] {
+function normalizeAssistantMemory(value: unknown): LegacyAssistantMemoryItem[] {
   if (!Array.isArray(value)) return [];
   const seenIds = new Set<string>();
   return value
     .map(normalizeAssistantMemoryItem)
-    .filter((item): item is AssistantMemoryItem => {
+    .filter((item): item is LegacyAssistantMemoryItem => {
       if (!item || seenIds.has(item.id)) return false;
       seenIds.add(item.id);
       return true;
@@ -207,9 +250,9 @@ function normalizeReflection(
   value: unknown,
   supportsMemoryReferences = false,
   supportsSuggestions = false
-): ReflectionEntry | null {
+): LegacyReflectionEntry | null {
   if (!value || typeof value !== "object") return null;
-  const entry = value as Partial<ReflectionEntry>;
+  const entry = value as Partial<LegacyReflectionEntry>;
   if (
     typeof entry.id !== "string" ||
     typeof entry.originalText !== "string" ||
@@ -247,7 +290,7 @@ function normalizeReflection(
   const analysisProfileUpdatedAt = typeof entry.analysisProfileUpdatedAt === "string"
     ? entry.analysisProfileUpdatedAt
     : null;
-  const rawAnalysisMemoryRefs = (entry as Partial<ReflectionEntry>).analysisMemoryRefs;
+  const rawAnalysisMemoryRefs = entry.analysisMemoryRefs;
   const normalizedMemoryRefs = supportsMemoryReferences
     ? normalizeReflectionMemoryReferences(rawAnalysisMemoryRefs)
     : [];
@@ -312,9 +355,9 @@ function reflectionNoteId(reflectionId: string): string {
 }
 
 function backfillReflectionNotes(
-  notes: Note[],
-  reflections: ReflectionEntry[]
-): { notes: Note[]; reflections: ReflectionEntry[] } {
+  notes: LegacyNote[],
+  reflections: LegacyReflectionEntry[]
+): { notes: LegacyNote[]; reflections: LegacyReflectionEntry[] } {
   const migratedNotes = [...notes];
   const noteIds = new Set(
     migratedNotes
@@ -345,7 +388,9 @@ function backfillReflectionNotes(
       suffix += 1;
     }
     migratedNotes.push({
-      ...createReflectionNote(reflection, noteId),
+      ...createReflectionNote(reflection.originalText, noteId, reflection.createdAt),
+      reflection: undefined,
+      contentUpdatedAt: undefined,
       updatedAt: reflection.updatedAt
     });
     noteIds.add(noteId);
@@ -363,6 +408,227 @@ function backfillReflectionNotes(
   });
 
   return { notes: migratedNotes, reflections: migratedReflections };
+}
+
+function reflectionMetadataFromLegacy(
+  reflection: LegacyReflectionEntry,
+  documentBody: string
+): ReflectionMetadata {
+  const retainSourceSnapshot = Boolean(
+    reflection.analysisRequestId ||
+    reflection.analysis ||
+    reflection.originalText !== documentBody
+  );
+  return {
+    status: reflection.status,
+    analysis: reflection.analysis,
+    correction: reflection.correction,
+    analysisRequestId: reflection.analysisRequestId,
+    analysisRequestDigest: reflection.analysisRequestDigest,
+    analysisRequestedAt: reflection.analysisRequestedAt,
+    analysisSourceUpdatedAt: reflection.analysisSourceUpdatedAt,
+    analysisSourceText: retainSourceSnapshot ? reflection.originalText : null,
+    analysisContextSections: [...reflection.analysisContextSections],
+    analysisProfileUpdatedAt: reflection.analysisProfileUpdatedAt,
+    analysisMemoryRefs: reflection.analysisMemoryRefs.map((reference) => ({ ...reference })),
+    suggestions: reflection.suggestions.map((suggestion) => ({ ...suggestion })),
+    confirmedAt: reflection.confirmedAt
+  };
+}
+
+function normalizeReflectionMetadata(
+  value: unknown,
+  createdAt: string,
+  updatedAt: string,
+  documentBody: string
+): ReflectionMetadata | null {
+  if (!isRecord(value)) return null;
+  const normalized = normalizeReflection({
+    ...value,
+    id: "document-reflection-metadata",
+    noteId: null,
+    originalText: typeof value.analysisSourceText === "string"
+      ? value.analysisSourceText
+      : documentBody,
+    createdAt,
+    updatedAt
+  }, true, true);
+  if (!normalized) return null;
+  const metadata = reflectionMetadataFromLegacy(normalized, documentBody);
+  return {
+    ...metadata,
+    analysisSourceText: typeof value.analysisSourceText === "string"
+      ? value.analysisSourceText
+      : metadata.analysisSourceText
+  };
+}
+
+function normalizeCurrentNote(value: LegacyNote): Note {
+  const contentUpdatedAt = isValidDateString(value.contentUpdatedAt)
+    ? value.contentUpdatedAt
+    : value.updatedAt;
+  return {
+    ...value,
+    contentUpdatedAt,
+    reflection: normalizeReflectionMetadata(
+      value.reflection,
+      value.createdAt,
+      value.updatedAt,
+      value.body
+    )
+  };
+}
+
+function mergeLegacyReflectionIntoNote(
+  note: Note,
+  reflection: LegacyReflectionEntry
+): Note {
+  const tags = note.tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление")
+    ? note.tags
+    : [...note.tags, "осмысление"];
+  return {
+    ...note,
+    tags,
+    origin: "reflection",
+    reflection: reflectionMetadataFromLegacy(reflection, note.body),
+    updatedAt: Date.parse(reflection.updatedAt) > Date.parse(note.updatedAt)
+      ? reflection.updatedAt
+      : note.updatedAt
+  };
+}
+
+function upgradeV14ToV15(candidate: DashboardStateV14): DashboardState {
+  const { reflections: _legacyReflections, ...stateWithoutLegacyReflections } = candidate;
+  const notes = candidate.notes.map(normalizeCurrentNote);
+  const noteIndexes = new Map(notes.map((note, index) => [note.id, index] as const));
+  const noteIds = new Set(noteIndexes.keys());
+  const reflectionDocumentIds = new Map<string, string>();
+
+  for (const reflection of candidate.reflections) {
+    const linkedNoteId = reflection.noteId && noteIds.has(reflection.noteId)
+      ? reflection.noteId
+      : null;
+    let noteId = linkedNoteId ?? reflectionNoteId(reflection.id);
+    if (!linkedNoteId) {
+      let suffix = 2;
+      const baseNoteId = noteId;
+      while (noteIds.has(noteId)) {
+        noteId = `${baseNoteId}-${suffix}`;
+        suffix += 1;
+      }
+    }
+
+    const existingIndex = noteIndexes.get(noteId);
+    if (existingIndex === undefined) {
+      const created = createReflectionNote(reflection.originalText, noteId, reflection.createdAt);
+      const merged = mergeLegacyReflectionIntoNote(
+        { ...created, updatedAt: reflection.updatedAt },
+        reflection
+      );
+      noteIndexes.set(noteId, notes.length);
+      noteIds.add(noteId);
+      notes.push(merged);
+    } else {
+      notes[existingIndex] = mergeLegacyReflectionIntoNote(notes[existingIndex], reflection);
+    }
+    reflectionDocumentIds.set(reflection.id, noteId);
+  }
+
+  for (let index = 0; index < notes.length; index += 1) {
+    const note = notes[index];
+    const tagged = note.origin === "reflection" ||
+      note.tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление");
+    if (tagged && !note.reflection) {
+      notes[index] = {
+        ...note,
+        reflection: normalizeReflectionMetadata({}, note.createdAt, note.updatedAt, note.body) ?? {
+          status: "captured",
+          analysis: null,
+          correction: null,
+          analysisRequestId: null,
+          analysisRequestDigest: null,
+          analysisRequestedAt: null,
+          analysisSourceUpdatedAt: null,
+          analysisSourceText: null,
+          analysisContextSections: [],
+          analysisProfileUpdatedAt: null,
+          analysisMemoryRefs: [],
+          suggestions: [],
+          confirmedAt: null
+        }
+      };
+    }
+  }
+
+  const assistantMemory: AssistantMemoryItem[] = candidate.assistantMemory.map((item) => ({
+    ...item,
+    sourceType: item.sourceType === "manual" ? "manual" : "document",
+    sourceId: item.sourceType === "manual"
+      ? null
+      : item.sourceType === "reflection"
+        ? reflectionDocumentIds.get(item.sourceId ?? "") ?? item.sourceId
+        : item.sourceId,
+    sourceUpdatedAt: item.sourceType === "manual" ? null : item.sourceUpdatedAt
+  }));
+
+  const trash = candidate.trash.flatMap((value): TrashEntry[] => {
+    if (!isRecord(value) || !isRecord(value.snapshot)) return [];
+    if (value.snapshot.kind === "reflection") {
+      const reflection = normalizeReflection(value.snapshot.reflection, true, true);
+      if (!reflection) return [];
+      const linkedNote = isRecord(value.snapshot.linkedNote)
+        ? normalizeCurrentNote(value.snapshot.linkedNote as unknown as LegacyNote)
+        : createReflectionNote(
+            reflection.originalText,
+            reflection.noteId ?? reflectionNoteId(reflection.id),
+            reflection.createdAt
+          );
+      const note = mergeLegacyReflectionIntoNote(linkedNote, reflection);
+      return [{
+        id: String(value.id),
+        entityKind: "note",
+        entityId: note.id,
+        title: typeof value.title === "string" ? value.title : note.title,
+        deletedAt: typeof value.deletedAt === "string" ? value.deletedAt : reflection.updatedAt,
+        snapshot: { kind: "note", note }
+      }];
+    }
+    if (value.snapshot.kind === "note" && isRecord(value.snapshot.note)) {
+      return [{
+        ...value,
+        entityKind: "note",
+        entityId: String(value.entityId),
+        snapshot: {
+          kind: "note",
+          note: normalizeCurrentNote(value.snapshot.note as unknown as LegacyNote)
+        }
+      } as TrashEntry];
+    }
+    return [value as unknown as TrashEntry];
+  });
+
+  const revisionHistory = candidate.revisionHistory.flatMap((value): EntityRevision[] => {
+    if (!isRecord(value) || !isRecord(value.snapshot)) return [];
+    if (value.snapshot.kind !== "note" || !isRecord(value.snapshot.note)) {
+      return [value as unknown as EntityRevision];
+    }
+    return [{
+      ...value,
+      snapshot: {
+        kind: "note",
+        note: normalizeCurrentNote(value.snapshot.note as unknown as LegacyNote)
+      }
+    } as EntityRevision];
+  });
+
+  return {
+    ...stateWithoutLegacyReflections,
+    version: 15,
+    notes,
+    assistantMemory,
+    trash,
+    revisionHistory
+  };
 }
 
 function mergeIntegrations(
@@ -413,7 +679,7 @@ function normalizeWidgets(
   return normalized.map((widget, order) => ({ ...widget, order }));
 }
 
-export function migrateState(candidate: DashboardState | LegacyDashboardState): DashboardState {
+function migrateToV14(candidate: DashboardStateV14 | LegacyDashboardState): DashboardStateV14 {
   const runtimeVersion = (candidate as { version?: unknown }).version;
   if (!Number.isInteger(runtimeVersion) || Number(runtimeVersion) < 1 || Number(runtimeVersion) > 14) {
     throw new Error(`Неподдерживаемая версия локальных данных: ${String(runtimeVersion)}.`);
@@ -442,7 +708,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 14) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, true))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -472,7 +738,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 13) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, true))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -502,7 +768,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 12) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, true))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -532,7 +798,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 11) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, true))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -562,7 +828,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 10) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, false))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -592,7 +858,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 9) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, false))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -622,7 +888,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 8) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, false))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -652,7 +918,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   if (candidate.version === 7) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, false))
-      .filter((entry): entry is ReflectionEntry => entry !== null);
+      .filter((entry): entry is LegacyReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
@@ -706,6 +972,22 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
   };
 }
 
+export function migrateState(candidate: MigrationCandidate): DashboardState {
+  const runtimeVersion = Number((candidate as { version?: unknown }).version);
+  if (!Number.isInteger(runtimeVersion) || runtimeVersion < 1 || runtimeVersion > 15) {
+    throw new Error(`Неподдерживаемая версия локальных данных: ${String(runtimeVersion)}.`);
+  }
+  if (runtimeVersion === 15) {
+    if (!isRecord(candidate) || !hasValidV15CanonicalData(candidate)) {
+      throw new Error("Локальные данные v15 повреждены: автосохранение остановлено.");
+    }
+    return candidate as DashboardState;
+  }
+  return upgradeV14ToV15(
+    migrateToV14(candidate as DashboardStateV14 | LegacyDashboardState)
+  );
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -729,7 +1011,7 @@ export async function loadState(): Promise<DashboardState | null> {
     let loaded: DashboardState | null = null;
     let failure: unknown = null;
     request.onsuccess = () => {
-      const result = request.result as DashboardState | LegacyDashboardState | undefined;
+      const result = request.result as MigrationCandidate | undefined;
       try {
         loaded = result ? migrateState(result) : null;
       } catch (error) {
@@ -738,10 +1020,10 @@ export async function loadState(): Promise<DashboardState | null> {
         return;
       }
       const version = result ? Number((result as { version?: unknown }).version) : null;
-      if (result && version !== null && version <= 13) {
-        const safetyRequest = store.get(PRE_V14_SAFETY_KEY);
+      if (result && version !== null && version <= 14) {
+        const safetyRequest = store.get(PRE_V15_SAFETY_KEY);
         safetyRequest.onsuccess = () => {
-          if (safetyRequest.result === undefined) store.put(result, PRE_V14_SAFETY_KEY);
+          if (safetyRequest.result === undefined) store.put(result, PRE_V15_SAFETY_KEY);
         };
       }
     };
@@ -770,7 +1052,7 @@ export async function saveState(state: DashboardState): Promise<void> {
     const indexRequest = store.get(AUTO_BACKUP_INDEX_KEY);
     let previousReady = false;
     let indexReady = false;
-    let previous: DashboardState | LegacyDashboardState | null = null;
+    let previous: MigrationCandidate | null = null;
     let index: AutomaticBackupSummary[] = [];
 
     const write = () => {
@@ -799,7 +1081,7 @@ export async function saveState(state: DashboardState): Promise<void> {
     };
 
     previousRequest.onsuccess = () => {
-      previous = previousRequest.result as DashboardState | LegacyDashboardState | undefined ?? null;
+      previous = previousRequest.result as MigrationCandidate | undefined ?? null;
       previousReady = true;
       write();
     };
@@ -904,7 +1186,7 @@ export async function loadAutomaticBackup(key: string): Promise<DashboardState> 
         return;
       }
       try {
-        resolve(migrateState(request.result as DashboardState | LegacyDashboardState));
+        resolve(migrateState(request.result as MigrationCandidate));
       } catch (error) {
         reject(error);
       }
@@ -1095,7 +1377,7 @@ function isValidCalendarEvent(value: unknown): boolean {
     isValidDateString(value.updatedAt);
 }
 
-function isValidNote(value: unknown): boolean {
+function isValidLegacyNote(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return isNonEmptyString(value.id) &&
     isNonEmptyString(value.title) &&
@@ -1164,17 +1446,44 @@ function isValidReflection(value: unknown): boolean {
     isNullableDateString(value.confirmedAt);
 }
 
-function isValidAssistantMemoryItem(value: unknown): boolean {
+function isValidReflectionMetadata(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  const reflectionSource = value.sourceType === "reflection";
+  const legacyShape = {
+    ...value,
+    id: "metadata-validation",
+    noteId: null,
+    originalText: typeof value.analysisSourceText === "string" ? value.analysisSourceText : "",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+  return isValidReflection(legacyShape) &&
+    (value.analysisSourceText === null || typeof value.analysisSourceText === "string");
+}
+
+function isValidNote(value: unknown): boolean {
+  return isValidLegacyNote(value) &&
+    isRecord(value) &&
+    isValidDateString(value.contentUpdatedAt) &&
+    (value.reflection === null || isValidReflectionMetadata(value.reflection));
+}
+
+function isValidLegacyAssistantMemoryItem(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const documentSource = value.sourceType === "reflection" || value.sourceType === "document";
   return isNonEmptyString(value.id) &&
     isNonEmptyString(value.text) &&
-    assistantMemorySourceTypes.includes(value.sourceType as AssistantMemoryItem["sourceType"]) &&
+    legacyAssistantMemorySourceTypes.includes(value.sourceType as LegacyAssistantMemoryItem["sourceType"]) &&
     assistantMemoryStatuses.includes(value.status as AssistantMemoryItem["status"]) &&
-    (reflectionSource ? isNonEmptyString(value.sourceId) : value.sourceId === null) &&
-    (reflectionSource ? isValidDateString(value.sourceUpdatedAt) : value.sourceUpdatedAt === null) &&
+    (documentSource ? isNonEmptyString(value.sourceId) : value.sourceId === null) &&
+    (documentSource ? isValidDateString(value.sourceUpdatedAt) : value.sourceUpdatedAt === null) &&
     isValidDateString(value.createdAt) &&
     isValidDateString(value.updatedAt);
+}
+
+function isValidAssistantMemoryItem(value: unknown): boolean {
+  return isValidLegacyAssistantMemoryItem(value) &&
+    isRecord(value) &&
+    (value.sourceType === "document" || value.sourceType === "manual");
 }
 
 const svpModes = ["off", "plain", "systemic"];
@@ -1335,7 +1644,7 @@ function isValidUniversalObjectSnapshot(value: unknown): boolean {
   }
 }
 
-function isValidTrashEntry(value: unknown): boolean {
+function isValidLegacyTrashEntry(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.snapshot)) return false;
   const common = isNonEmptyString(value.id) &&
     isNonEmptyString(value.entityId) &&
@@ -1349,10 +1658,10 @@ function isValidTrashEntry(value: unknown): boolean {
       Array.isArray(value.snapshot.linkedEvents) &&
       value.snapshot.linkedEvents.every(isValidCalendarEvent);
   }
-  if (value.snapshot.kind === "note") return isValidNote(value.snapshot.note);
+  if (value.snapshot.kind === "note") return isValidLegacyNote(value.snapshot.note);
   if (value.snapshot.kind === "reflection") {
     return isValidReflection(value.snapshot.reflection) &&
-      (value.snapshot.linkedNote === null || isValidNote(value.snapshot.linkedNote));
+      (value.snapshot.linkedNote === null || isValidLegacyNote(value.snapshot.linkedNote));
   }
   if (value.snapshot.kind === "event") return isValidCalendarEvent(value.snapshot.event);
   if (value.snapshot.kind !== "object" || !isValidUniversalObjectSnapshot(value.snapshot.object)) return false;
@@ -1373,6 +1682,58 @@ function isValidTrashEntry(value: unknown): boolean {
   ));
 }
 
+function isValidLegacyEntityRevision(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.snapshot)) return false;
+  const common = isNonEmptyString(value.id) &&
+    isNonEmptyString(value.entityId) &&
+    ["task", "note", "event", "object"].includes(String(value.entityKind)) &&
+    typeof value.title === "string" &&
+    isValidDateString(value.capturedAt) &&
+    value.entityKind === value.snapshot.kind;
+  if (!common) return false;
+  if (value.snapshot.kind === "task") return isValidTask(value.snapshot.task);
+  if (value.snapshot.kind === "note") return isValidLegacyNote(value.snapshot.note);
+  if (value.snapshot.kind === "event") return isValidCalendarEvent(value.snapshot.event);
+  return value.snapshot.kind === "object" && isValidUniversalObjectSnapshot(value.snapshot.object);
+}
+
+function isValidTrashEntry(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.snapshot)) return false;
+  const common = isNonEmptyString(value.id) &&
+    isNonEmptyString(value.entityId) &&
+    ["task", "note", "event", "object"].includes(String(value.entityKind)) &&
+    typeof value.title === "string" &&
+    isValidDateString(value.deletedAt) &&
+    value.entityKind === value.snapshot.kind;
+  if (!common) return false;
+  if (value.snapshot.kind === "task") {
+    return isValidTask(value.snapshot.task) &&
+      Array.isArray(value.snapshot.linkedEvents) &&
+      value.snapshot.linkedEvents.every(isValidCalendarEvent);
+  }
+  if (value.snapshot.kind === "note") return isValidNote(value.snapshot.note);
+  if (value.snapshot.kind === "event") return isValidCalendarEvent(value.snapshot.event);
+  if (value.snapshot.kind !== "object" || !isValidUniversalObjectSnapshot(value.snapshot.object)) {
+    return false;
+  }
+  const objectId = isRecord(value.snapshot.object) && isNonEmptyString(value.snapshot.object.id)
+    ? value.snapshot.object.id
+    : null;
+  return Boolean(objectId) &&
+    Array.isArray(value.snapshot.relations) &&
+    value.snapshot.relations.every((relation) => (
+      isRecord(relation) &&
+      isNonEmptyString(relation.id) &&
+      ["contains", "links", "embeds"].includes(String(relation.kind)) &&
+      isNonEmptyString(relation.fromId) &&
+      isNonEmptyString(relation.toId) &&
+      relation.fromId !== relation.toId &&
+      (relation.fromId === objectId || relation.toId === objectId) &&
+      isFiniteInteger(relation.order, 0) &&
+      isValidDateString(relation.createdAt)
+    ));
+}
+
 function isValidEntityRevision(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.snapshot)) return false;
   const common = isNonEmptyString(value.id) &&
@@ -1388,6 +1749,44 @@ function isValidEntityRevision(value: unknown): boolean {
   return value.snapshot.kind === "object" && isValidUniversalObjectSnapshot(value.snapshot.object);
 }
 
+function hasValidV15CanonicalData(candidate: Record<string, unknown>): boolean {
+  if (
+    candidate.version !== 15 ||
+    !Array.isArray(candidate.tasks) || !hasUniqueEntityIds(candidate.tasks, isValidTask) ||
+    !Array.isArray(candidate.projects) || !hasUniqueEntityIds(candidate.projects, isValidProject) ||
+    !Array.isArray(candidate.lifeAreas) || !hasUniqueEntityIds(candidate.lifeAreas, isValidLifeArea) ||
+    !Array.isArray(candidate.events) || !hasUniqueEntityIds(candidate.events, isValidCalendarEvent) ||
+    !Array.isArray(candidate.notes) || !hasUniqueEntityIds(candidate.notes, isValidNote) ||
+    !Array.isArray(candidate.assistantMemory) ||
+      !hasUniqueEntityIds(candidate.assistantMemory, isValidAssistantMemoryItem) ||
+    !isValidPersonalContext(candidate.personalContext) ||
+    !isValidAppSettings(candidate.settings) ||
+    !isValidIntegrations(candidate.integrations) ||
+    !Array.isArray(candidate.widgets) || !hasUniqueEntityIds(candidate.widgets, isValidWidget) ||
+    !Array.isArray(candidate.readingItems) ||
+      !hasUniqueEntityIds(candidate.readingItems, isValidReadingItem) ||
+    !Array.isArray(candidate.activityLog) ||
+      !hasUniqueEntityIds(candidate.activityLog, isValidActivityEntry) ||
+    !Array.isArray(candidate.trash) || !hasUniqueEntityIds(candidate.trash, isValidTrashEntry) ||
+    !Array.isArray(candidate.revisionHistory) ||
+      !hasUniqueEntityIds(candidate.revisionHistory, isValidEntityRevision) ||
+    !isValidDateString(candidate.updatedAt)
+  ) return false;
+
+  const areaIds = new Set(candidate.lifeAreas.map((area) => (area as { id: string }).id));
+  if (candidate.projects.some((project) => {
+    const areaId = (project as { areaId: string | null }).areaId;
+    return areaId !== null && !areaIds.has(areaId);
+  })) return false;
+
+  try {
+    normalizeObjectGraph(candidate.objectGraph);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 function hasValidCanonicalData(candidate: Record<string, unknown>, expectedVersion: 13 | 14): boolean {
   if (
     candidate.version !== expectedVersion ||
@@ -1395,9 +1794,9 @@ function hasValidCanonicalData(candidate: Record<string, unknown>, expectedVersi
     !Array.isArray(candidate.projects) || !hasUniqueEntityIds(candidate.projects, isValidProject) ||
     !Array.isArray(candidate.lifeAreas) || !hasUniqueEntityIds(candidate.lifeAreas, isValidLifeArea) ||
     !Array.isArray(candidate.events) || !hasUniqueEntityIds(candidate.events, isValidCalendarEvent) ||
-    !Array.isArray(candidate.notes) || !hasUniqueEntityIds(candidate.notes, isValidNote) ||
+    !Array.isArray(candidate.notes) || !hasUniqueEntityIds(candidate.notes, isValidLegacyNote) ||
     !Array.isArray(candidate.reflections) || !hasUniqueEntityIds(candidate.reflections, isValidReflection) ||
-    !Array.isArray(candidate.assistantMemory) || !hasUniqueEntityIds(candidate.assistantMemory, isValidAssistantMemoryItem) ||
+    !Array.isArray(candidate.assistantMemory) || !hasUniqueEntityIds(candidate.assistantMemory, isValidLegacyAssistantMemoryItem) ||
     !isValidPersonalContext(candidate.personalContext) ||
     !isValidAppSettings(candidate.settings) ||
     !isValidIntegrations(candidate.integrations) ||
@@ -1422,9 +1821,9 @@ function hasValidV13CanonicalData(candidate: Record<string, unknown>): boolean {
 
 function hasValidV14CanonicalData(candidate: Record<string, unknown>): boolean {
   return hasValidCanonicalData(candidate, 14) &&
-    Array.isArray(candidate.trash) && hasUniqueEntityIds(candidate.trash, isValidTrashEntry) &&
+    Array.isArray(candidate.trash) && hasUniqueEntityIds(candidate.trash, isValidLegacyTrashEntry) &&
     Array.isArray(candidate.revisionHistory) &&
-      hasUniqueEntityIds(candidate.revisionHistory, isValidEntityRevision);
+      hasUniqueEntityIds(candidate.revisionHistory, isValidLegacyEntityRevision);
 }
 
 function isValidV13Backup(candidate: Record<string, unknown>): boolean {
@@ -1492,7 +1891,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
       candidate.version !== 11 &&
       candidate.version !== 12 &&
       candidate.version !== 13 &&
-      candidate.version !== 14) ||
+      candidate.version !== 14 &&
+      candidate.version !== 15) ||
     !Array.isArray(candidate.tasks) ||
     !Array.isArray(candidate.projects) ||
     (candidate.version >= 2 && !Array.isArray(candidate.events)) ||
@@ -1502,19 +1902,21 @@ export async function readBackup(file: File): Promise<DashboardState> {
       (!Array.isArray(candidate.widgets) ||
         !Array.isArray(candidate.readingItems) ||
         !Array.isArray(candidate.activityLog))) ||
-    (candidate.version >= 7 &&
+    (candidate.version >= 7 && candidate.version <= 14 &&
       !Array.isArray(candidate.reflections)) ||
     (candidate.version >= 8 && !candidate.personalContext) ||
     (candidate.version >= 9 && !Array.isArray(candidate.assistantMemory)) ||
-    (candidate.version >= 11 && !reflectionsHaveSuggestionArrays(candidate.reflections)) ||
+    (candidate.version >= 11 && candidate.version <= 14 &&
+      !reflectionsHaveSuggestionArrays(candidate.reflections)) ||
     (candidate.version >= 12 && !Array.isArray(candidate.lifeAreas)) ||
     (candidate.version >= 13 && !candidate.objectGraph) ||
-    (candidate.version === 14 && (!Array.isArray(candidate.trash) || !Array.isArray(candidate.revisionHistory))) ||
+    (candidate.version >= 14 && (!Array.isArray(candidate.trash) || !Array.isArray(candidate.revisionHistory))) ||
     !candidate.settings ||
     (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>)) ||
-    (candidate.version === 14 && !isValidV14Backup(candidate as Record<string, unknown>))
+    (candidate.version === 14 && !isValidV14Backup(candidate as Record<string, unknown>)) ||
+    (candidate.version === 15 && !hasValidV15CanonicalData(candidate as Record<string, unknown>))
   ) {
     throw new Error("Файл не похож на резервную копию командного центра.");
   }
-  return migrateState(candidate as unknown as DashboardState | LegacyDashboardState);
+  return migrateState(candidate as unknown as MigrationCandidate);
 }

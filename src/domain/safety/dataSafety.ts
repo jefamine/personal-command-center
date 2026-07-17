@@ -2,7 +2,6 @@ import type {
   CalendarEvent,
   EntityRevision,
   Note,
-  ReflectionEntry,
   RevisionSnapshot,
   Task,
   TrashEntry
@@ -91,23 +90,6 @@ export function noteTrashEntry(
     title: note.title,
     deletedAt,
     snapshot: { kind: "note", note }
-  };
-}
-
-export function reflectionTrashEntry(
-  reflection: ReflectionEntry,
-  linkedNote: Note | null,
-  deletedAt = new Date().toISOString(),
-  id: string = crypto.randomUUID()
-): TrashEntry {
-  const title = reflection.originalText.trim().split(/\r?\n/, 1)[0]?.slice(0, 80) || "Запись осмысления";
-  return {
-    id,
-    entityId: reflection.id,
-    entityKind: "reflection",
-    title,
-    deletedAt,
-    snapshot: { kind: "reflection", reflection, linkedNote }
   };
 }
 

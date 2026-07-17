@@ -143,8 +143,12 @@ export interface Note {
   projectId: string | null;
   tags: string[];
   pinned: boolean;
-  /** Durable, non-editable provenance used to keep personal reflection notes private. */
+  /** Durable, non-editable provenance used to keep personal notes private by default. */
   origin?: "reflection";
+  /** Changes only when the document content changes, not when analysis metadata changes. */
+  contentUpdatedAt: string;
+  /** Optional analysis workflow. The document itself remains the only content entity. */
+  reflection: ReflectionMetadata | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -173,6 +177,27 @@ export interface ReflectionAnalysis {
   proposedAction: string;
   source: "codex";
   generatedAt: string;
+}
+
+/**
+ * Optional metadata attached to a document shown in the “Осмысление” view.
+ * It is not a second user entity and does not contain another editable document body.
+ */
+export interface ReflectionMetadata {
+  status: ReflectionStatus;
+  analysis: ReflectionAnalysis | null;
+  correction: string | null;
+  analysisRequestId: string | null;
+  analysisRequestDigest: string | null;
+  analysisRequestedAt: string | null;
+  analysisSourceUpdatedAt: string | null;
+  /** Exact immutable source snapshot for an analysis request/result or lossless legacy migration. */
+  analysisSourceText: string | null;
+  analysisContextSections: PersonalContextSectionId[];
+  analysisProfileUpdatedAt: string | null;
+  analysisMemoryRefs: ReflectionMemoryReference[];
+  suggestions: ReflectionSuggestion[];
+  confirmedAt: string | null;
 }
 
 export type PersonalContextSectionId =
@@ -226,28 +251,10 @@ export interface ReflectionContextProjection {
   };
 }
 
-export interface ReflectionEntry {
-  id: string;
-  noteId: string | null;
-  originalText: string;
-  status: ReflectionStatus;
-  analysis: ReflectionAnalysis | null;
-  correction: string | null;
-  analysisRequestId: string | null;
-  analysisRequestDigest: string | null;
-  analysisRequestedAt: string | null;
-  analysisSourceUpdatedAt: string | null;
-  analysisContextSections: PersonalContextSectionId[];
-  analysisProfileUpdatedAt: string | null;
-  analysisMemoryRefs: ReflectionMemoryReference[];
-  suggestions: ReflectionSuggestion[];
-  createdAt: string;
-  updatedAt: string;
-  confirmedAt: string | null;
-}
+export type ReflectionDocument = Note & { reflection: ReflectionMetadata };
 
 export type AssistantMemoryStatus = "active" | "paused";
-export type AssistantMemorySourceType = "reflection" | "manual";
+export type AssistantMemorySourceType = "document" | "manual";
 
 export interface AssistantMemoryItem {
   id: string;
@@ -431,12 +438,11 @@ export interface ActivityEntry {
   metadata: Record<string, string | number | boolean | null>;
 }
 
-export type RecoverableEntityKind = "task" | "note" | "reflection" | "event" | "object";
+export type RecoverableEntityKind = "task" | "note" | "event" | "object";
 
 export type RecoverableEntitySnapshot =
   | { kind: "task"; task: Task; linkedEvents: CalendarEvent[] }
   | { kind: "note"; note: Note }
-  | { kind: "reflection"; reflection: ReflectionEntry; linkedNote: Note | null }
   | { kind: "event"; event: CalendarEvent }
   | { kind: "object"; object: UniversalObject; relations: ObjectRelation[] };
 
@@ -521,13 +527,12 @@ export interface IntegrationSettings {
 }
 
 export interface DashboardState {
-  version: 14;
+  version: 15;
   tasks: Task[];
   projects: Project[];
   lifeAreas: LifeArea[];
   events: CalendarEvent[];
   notes: Note[];
-  reflections: ReflectionEntry[];
   assistantMemory: AssistantMemoryItem[];
   personalContext: PersonalContext;
   settings: AppSettings;

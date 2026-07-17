@@ -41,6 +41,10 @@ import {
   hasStoredReflectionResponse,
   type PendingReflectionAcknowledgement
 } from "../domain/reflections/reflectionAcknowledgement";
+import {
+  reflectionContentUpdatedAt,
+  reflectionDocuments
+} from "../domain/reflections/reflectionNote";
 import { ReflectionArchiveDrawer } from "./ReflectionArchiveDrawer";
 import { ReflectionSuggestionsPanel } from "./ReflectionSuggestionsPanel";
 import { useDashboard } from "../state/DashboardContext";
@@ -49,7 +53,8 @@ import type {
   DashboardWidget,
   PersonalContextSectionId,
   ReflectionAnalysisRequest,
-  ReflectionEntry
+  ReflectionDocument,
+  ReflectionStatus
 } from "../types";
 
 interface ReflectionWidgetProps {
@@ -60,18 +65,18 @@ interface ReflectionWidgetProps {
 
 type EditorMode = "compose" | "preview" | "correction";
 
-function sourceUpdatedAt(entry: ReflectionEntry) {
-  return (entry as ReflectionEntry & { updatedAt?: string }).updatedAt ?? entry.createdAt;
+function sourceUpdatedAt(entry: ReflectionDocument) {
+  return reflectionContentUpdatedAt(entry);
 }
 
-function statusCopy(status: ReflectionEntry["status"]) {
+function statusCopy(status: ReflectionStatus) {
   if (status === "confirmed") return { label: "Подтверждено", icon: CheckCircle2 };
   if (status === "corrected") return { label: "Учтено с поправкой", icon: PenLine };
   if (status === "ignored") return { label: "Не учитывается", icon: X };
   return null;
 }
 
-function memorySourceLabel(item: AssistantMemoryItem, reflections: ReflectionEntry[]) {
+function memorySourceLabel(item: AssistantMemoryItem, reflections: ReflectionDocument[]) {
   if (item.sourceType === "manual") return "Добавлено вручную";
   const source = item.sourceId
     ? reflections.find((entry) => entry.id === item.sourceId) ?? null
@@ -87,13 +92,13 @@ function memorySourceLabel(item: AssistantMemoryItem, reflections: ReflectionEnt
 }
 
 interface UsedMemoryDetailsProps {
-  entry: ReflectionEntry;
+  entry: ReflectionDocument;
   memory: AssistantMemoryItem[];
   phase: "queued" | "analyzed";
 }
 
 function UsedMemoryDetails({ entry, memory, phase }: UsedMemoryDetailsProps) {
-  const references = entry.analysisMemoryRefs ?? [];
+  const references = entry.reflection.analysisMemoryRefs;
   if (!references.length) return null;
 
   return (
@@ -138,10 +143,11 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
     removeReflection,
     addTask
   } = useDashboard();
-  const reflections = state.reflections ?? [];
+  const reflections = useMemo(() => reflectionDocuments(state.notes), [state.notes]);
   const memoryPickerId = `reflection-memory-picker-${widget.id}`;
   const latest = useMemo(
-    () => reflections.find((entry) => entry.status === "queued") ?? [...reflections].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
+    () => reflections.find((entry) => entry.reflection.status === "queued") ??
+      [...reflections].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
     [reflections]
   );
   const [activeId, setActiveId] = useState<string | null>(startInCompose ? null : latest?.id ?? null);
@@ -282,7 +288,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
     setActiveId(entry.id);
     setComposing(false);
     setDraftText("");
-    setMessage("Запись сохранена и добавлена в «Заметки» для следующего экспорта в Obsidian.");
+    setMessage("Документ сохранён. Он войдёт в следующий экспорт заметок в Obsidian.");
   };
 
   const openPreview = (text: string, entryId: string | null = null) => {
@@ -315,7 +321,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
       entryId: entry.id,
       requestId,
       sourceUpdatedAt: sourceStamp,
-      originalText: entry.originalText,
+      originalText: entry.body,
       context: previewContext,
       memory: previewMemoryState.projection
     };
@@ -337,11 +343,11 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
       setPreviewEntryId(null);
       setSelectedContextSections([]);
       clearMemorySelection();
-      setMessage("Запись добавлена в «Заметки» и передана в локальную очередь. Проверяем ответ каждые 20 секунд.");
+      setMessage("Документ сохранён и передан в локальную очередь. Проверяем ответ каждые 20 секунд.");
     } catch (error) {
       setMessage(error instanceof Error
-        ? `Запись сохранена. ${error.message} Выбор оставлен для повторной попытки.`
-        : "Запись сохранена, но поставить её в очередь пока не удалось. Выбор для повторной попытки оставлен без изменений.");
+        ? `Документ сохранён. ${error.message} Выбор оставлен для повторной попытки.`
+        : "Документ сохранён, но поставить его в очередь пока не удалось. Выбор для повторной попытки оставлен без изменений.");
     } finally {
       setBusy(null);
     }
@@ -350,8 +356,8 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
   const checkAnalysis = useCallback(async (silent = false) => {
     if (
       !active ||
-      active.status !== "queued" ||
-      !active.analysisRequestId ||
+      active.reflection.status !== "queued" ||
+      !active.reflection.analysisRequestId ||
       checkingRef.current ||
       cancellingRef.current
     ) return;
@@ -365,15 +371,15 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
         if (!silent) setMessage("Ответ пока не готов. Запись остаётся в очереди.");
         return;
       }
-      if (response.requestId !== active.analysisRequestId || response.entryId !== active.id) {
+      if (response.requestId !== active.reflection.analysisRequestId || response.entryId !== active.id) {
         if (!silent) setMessage("Получен ответ для другой записи. Эта запись продолжает ждать своего разбора.");
         return;
       }
-      if (response.sourceUpdatedAt !== active.analysisSourceUpdatedAt) {
+      if (response.sourceUpdatedAt !== active.reflection.analysisSourceUpdatedAt) {
         if (!silent) setMessage("Ответ относится к более ранней версии записи и не был применён.");
         return;
       }
-      if (response.requestDigest !== active.analysisRequestDigest) {
+      if (response.requestDigest !== active.reflection.analysisRequestDigest) {
         if (!silent) setMessage("Ответ не совпадает с подтверждённым текстом и контекстом и не был применён.");
         return;
       }
@@ -435,7 +441,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
   }, [pendingAcknowledgement, pendingAcknowledgementAccepted]);
 
   useEffect(() => {
-    if (!active || active.status !== "queued") return;
+    if (!active || active.reflection.status !== "queued") return;
     const timer = window.setInterval(() => { void checkAnalysis(true); }, 20_000);
     return () => window.clearInterval(timer);
   }, [active, checkAnalysis]);
@@ -445,13 +451,17 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
       setMessage("Сначала завершаю безопасное сохранение разбора. Удаление станет доступно после очистки локальной очереди.");
       return;
     }
-    if (!active || !window.confirm("Удалить эту запись и её разбор? Связанная заметка и сохранённая память останутся отдельно.")) return;
+    if (!active || !window.confirm("Удалить этот документ и его разбор? Сохранённая память помощника останется отдельно.")) return;
     removeReflection(active.id);
     beginNew();
   };
 
   const cancelQueuedAnalysis = async () => {
-    if (!active?.analysisRequestId || !active.analysisRequestDigest || active.status !== "queued") return;
+    if (
+      !active?.reflection.analysisRequestId ||
+      !active.reflection.analysisRequestDigest ||
+      active.reflection.status !== "queued"
+    ) return;
     if (checkingRef.current) {
       setMessage("Сейчас завершается проверка ответа. После неё отмену можно будет повторить.");
       return;
@@ -460,7 +470,10 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
     setBusy("cancel");
     setMessage("");
     try {
-      await cancelReflectionAnalysis(active.analysisRequestId, active.analysisRequestDigest);
+      await cancelReflectionAnalysis(
+        active.reflection.analysisRequestId,
+        active.reflection.analysisRequestDigest
+      );
       cancelReflectionRequest(active.id);
       setMessage("Ожидание отменено. Запись осталась на устройстве и её можно разобрать позже.");
     } catch (error) {
@@ -480,7 +493,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
   };
 
   const addProposedAction = () => {
-    const title = active?.analysis?.proposedAction.trim();
+    const title = active?.reflection.analysis?.proposedAction.trim();
     if (!active || !title) return;
     addTask({
       title,
@@ -534,15 +547,15 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
   };
   const closeArchive = useCallback(() => setArchiveOpen(false), []);
 
-  const proposedAction = active?.analysis?.proposedAction.trim() ?? "";
-  const hasStructuredSuggestions = Boolean(active?.suggestions?.length);
+  const proposedAction = active?.reflection.analysis?.proposedAction.trim() ?? "";
+  const hasStructuredSuggestions = Boolean(active?.reflection.suggestions.length);
   const selectedMemoryCount = previewMemoryState.projection?.items.length ?? 0;
   const hasSelectedAnalysisContext = selectedContextSections.length > 0 || selectedMemoryCount > 0;
   const actionAlreadyExists = Boolean(proposedAction && state.tasks.some(
     (task) => task.status !== "done" && task.title.trim().toLocaleLowerCase("ru") === proposedAction.toLocaleLowerCase("ru")
   ));
-  const reviewStatus = active ? statusCopy(active.status) : null;
-  const activeContextLabels = active?.analysisContextSections.map(
+  const reviewStatus = active ? statusCopy(active.reflection.status) : null;
+  const activeContextLabels = active?.reflection.analysisContextSections.map(
     (section) => PERSONAL_CONTEXT_SECTION_LABELS[section]
   ) ?? [];
 
@@ -555,8 +568,8 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
           <h2>{widget.title}</h2>
         </div>
         <div className="reflection-header-actions">
-          <button type="button" className="reflection-new-button" onClick={() => setArchiveOpen(true)} aria-label="Открыть все записи и память"><History size={17} /> Все записи · {reflections.length}</button>
-          {active && active.status !== "queued" && !composing && mode === "compose" ? (
+          <button type="button" className="reflection-new-button" onClick={() => setArchiveOpen(true)} aria-label="Открыть документы осмысления и память"><History size={17} /> Документы · {reflections.length}</button>
+          {active && active.reflection.status !== "queued" && !composing && mode === "compose" ? (
             <button type="button" className="reflection-new-button" onClick={beginNew} aria-label="Новая запись"><Plus size={17} /> Новая запись</button>
           ) : null}
         </div>
@@ -723,10 +736,10 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
             <button type="button" className="secondary-button" onClick={leavePreview} disabled={busy === "queue"}>Назад</button>
           </div>
         </div>
-      ) : mode === "correction" && active?.analysis ? (
+      ) : mode === "correction" && active?.reflection.analysis ? (
         <div className="reflection-correction">
           <div className="reflection-section-intro"><PenLine size={21} /><div><strong>Поправить понимание</strong><span>Исходный разбор сохранится, а ваша поправка будет храниться отдельно.</span></div></div>
-          <blockquote>{active.analysis.understanding}</blockquote>
+          <blockquote>{active.reflection.analysis.understanding}</blockquote>
           <label>
             <span>Что понято неверно или чего не хватает?</span>
             <textarea value={correction} onChange={(event) => setCorrection(event.target.value)} rows={4} autoFocus />
@@ -748,7 +761,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
             placeholder="Можно писать как думается — ничего размечать не нужно."
           />
           <div className="reflection-composer-footer">
-            <span><ShieldCheck size={15} /> Сохранится локально и появится в «Заметках» для Obsidian</span>
+            <span><ShieldCheck size={15} /> Сохранится как документ и войдёт в экспорт заметок Obsidian</span>
             <div className="reflection-actions">
               <button type="button" className="reflection-save-button" onClick={saveOnly} disabled={!draftText.trim()}>Просто сохранить</button>
               <button type="button" className="primary-button" onClick={() => openPreview(draftText)} disabled={!draftText.trim()}><Sparkles size={17} /> Разобрать</button>
@@ -756,7 +769,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
           </div>
           <small className="reflection-key-hint">Ctrl + Enter — посмотреть и отправить на разбор</small>
         </div>
-      ) : active.status === "queued" ? (
+      ) : active.reflection.status === "queued" ? (
         <div className="reflection-queued">
           <div className="reflection-state-icon"><Clock3 size={24} /></div>
           <div className="reflection-queued-copy">
@@ -764,7 +777,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
             <p>Она уже сохранена локально. Без готового ответа система не будет изображать глубокое понимание.</p>
             {activeContextLabels.length ? <p className="reflection-context-used">В запрос передано: {activeContextLabels.join(" · ")}</p> : null}
             <UsedMemoryDetails entry={active} memory={state.assistantMemory ?? []} phase="queued" />
-            <details><summary>Показать отправленный текст <ChevronDown size={15} /></summary><div>{active.originalText}</div></details>
+            <details><summary>Показать отправленный текст <ChevronDown size={15} /></summary><div>{active.reflection.analysisSourceText ?? active.body}</div></details>
           </div>
           <div className="reflection-queued-actions">
             <button type="button" className="secondary-button reflection-check-button" onClick={() => void checkAnalysis(false)} disabled={busy !== null || bridgeCheckActive}>
@@ -777,26 +790,26 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
             </button>
           </div>
         </div>
-      ) : active.analysis ? (
-        <div className={`reflection-analysis ${active.status === "ignored" ? "is-ignored" : ""}`}>
+      ) : active.reflection.analysis ? (
+        <div className={`reflection-analysis ${active.reflection.status === "ignored" ? "is-ignored" : ""}`}>
           <div className="reflection-analysis-title">
             <div className="reflection-state-icon is-ready"><Lightbulb size={23} /></div>
             <div><span>{reviewStatus ? reviewStatus.label : "Проверьте понимание"}</span><h3>Я понял</h3></div>
-            {reviewStatus ? (() => { const StatusIcon = reviewStatus.icon; return <span className={`reflection-review-badge is-${active.status}`}><StatusIcon size={15} /> {reviewStatus.label}</span>; })() : null}
+            {reviewStatus ? (() => { const StatusIcon = reviewStatus.icon; return <span className={`reflection-review-badge is-${active.reflection.status}`}><StatusIcon size={15} /> {reviewStatus.label}</span>; })() : null}
           </div>
 
-          <p className="reflection-understanding">{active.analysis.understanding}</p>
+          <p className="reflection-understanding">{active.reflection.analysis.understanding}</p>
           {activeContextLabels.length ? <p className="reflection-context-used">В разбор передано: {activeContextLabels.join(" · ")}</p> : null}
           <UsedMemoryDetails entry={active} memory={state.assistantMemory ?? []} phase="analyzed" />
 
-          {active.correction ? (
-            <div className="reflection-user-correction"><PenLine size={18} /><div><span>Ваша поправка</span><p>{active.correction}</p></div></div>
+          {active.reflection.correction ? (
+            <div className="reflection-user-correction"><PenLine size={18} /><div><span>Ваша поправка</span><p>{active.reflection.correction}</p></div></div>
           ) : null}
 
           {hasStructuredSuggestions ? <ReflectionSuggestionsPanel entry={active} /> : (
             <>
-              {active.analysis.question ? (
-                <div className="reflection-question"><CircleHelp size={19} /><div><span>Важный вопрос</span><strong>{active.analysis.question}</strong></div></div>
+              {active.reflection.analysis.question ? (
+                <div className="reflection-question"><CircleHelp size={19} /><div><span>Важный вопрос</span><strong>{active.reflection.analysis.question}</strong></div></div>
               ) : null}
 
               {proposedAction ? (
@@ -813,17 +826,17 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
 
           {whyOpen ? (
             <div className="reflection-why" id={`reflection-why-${active.id}`}>
-              {active.analysis.observations.length ? <section><strong>На что я опираюсь</strong><ul>{active.analysis.observations.map((item) => <li key={item}>{item}</li>)}</ul></section> : null}
-              {!hasStructuredSuggestions && active.analysis.possibleExplanation ? <section><strong>Возможное объяснение</strong><p>{active.analysis.possibleExplanation}</p></section> : null}
-              {active.analysis.alternatives.length ? <section><strong>Другие варианты</strong><ul>{active.analysis.alternatives.map((item) => <li key={item}>{item}</li>)}</ul></section> : null}
+              {active.reflection.analysis.observations.length ? <section><strong>На что я опираюсь</strong><ul>{active.reflection.analysis.observations.map((item) => <li key={item}>{item}</li>)}</ul></section> : null}
+              {!hasStructuredSuggestions && active.reflection.analysis.possibleExplanation ? <section><strong>Возможное объяснение</strong><p>{active.reflection.analysis.possibleExplanation}</p></section> : null}
+              {active.reflection.analysis.alternatives.length ? <section><strong>Другие варианты</strong><ul>{active.reflection.analysis.alternatives.map((item) => <li key={item}>{item}</li>)}</ul></section> : null}
             </div>
           ) : null}
 
           <div className="reflection-review-actions">
-            {active.status === "analyzed" ? <button type="button" className="primary-button" onClick={() => reviewReflection(active.id, "confirmed")}><Check size={17} /> Верно</button> : null}
-            {active.status !== "ignored" ? <button type="button" className="secondary-button" onClick={() => { setCorrection(active.correction ?? ""); setMode("correction"); }}><PenLine size={17} /> Поправить</button> : null}
+            {active.reflection.status === "analyzed" ? <button type="button" className="primary-button" onClick={() => reviewReflection(active.id, "confirmed")}><Check size={17} /> Верно</button> : null}
+            {active.reflection.status !== "ignored" ? <button type="button" className="secondary-button" onClick={() => { setCorrection(active.reflection.correction ?? ""); setMode("correction"); }}><PenLine size={17} /> Поправить</button> : null}
             <button type="button" className="reflection-why-button" aria-expanded={whyOpen} aria-controls={`reflection-why-${active.id}`} onClick={() => setWhyOpen((value) => !value)}><CircleHelp size={17} /> {whyOpen ? "Скрыть объяснение" : "Почему?"}</button>
-            {active.status === "analyzed" ? <button type="button" className="reflection-ignore-button" onClick={() => reviewReflection(active.id, "ignored")}><X size={16} /> Не учитывать</button> : null}
+            {active.reflection.status === "analyzed" ? <button type="button" className="reflection-ignore-button" onClick={() => reviewReflection(active.id, "ignored")}><X size={16} /> Не учитывать</button> : null}
           </div>
 
           <button type="button" className="reflection-delete-button" onClick={deleteActive}><Trash2 size={16} /> Удалить запись</button>
@@ -831,9 +844,9 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
       ) : (
         <div className="reflection-saved">
           <div className="reflection-state-icon"><PenLine size={23} /></div>
-          <div><strong>Запись сохранена</strong><p>{active.originalText}</p></div>
+          <div><strong>Документ сохранён</strong><p>{active.body}</p></div>
           <div className="reflection-saved-actions">
-            <button type="button" className="primary-button" onClick={() => openPreview(active.originalText, active.id)}><Sparkles size={17} /> Разобрать</button>
+            <button type="button" className="primary-button" onClick={() => openPreview(active.body, active.id)}><Sparkles size={17} /> Разобрать</button>
             <button type="button" className="reflection-delete-button" onClick={deleteActive}><Trash2 size={16} /> Удалить</button>
           </div>
         </div>
@@ -841,13 +854,13 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
 
       {onOpenJournal && reflections.length ? (
         <div className="reflection-recent-entries">
-          <div><span><BookOpenText size={16} /> Последние записи</span><button type="button" onClick={onOpenJournal}>Открыть дневник</button></div>
+          <div><span><BookOpenText size={16} /> Последние документы</span><button type="button" onClick={onOpenJournal}>Открыть осмысление</button></div>
           <div>
             {[...reflections].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 3).map((entry) => (
               <button key={entry.id} type="button" className={active?.id === entry.id && !composing ? "active" : ""} onClick={() => openArchivedReflection(entry.id)}>
                 <time>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(entry.createdAt))}</time>
-                <span>{entry.originalText}</span>
-                <small>{entry.noteId && state.notes.some((note) => note.id === entry.noteId) ? "В заметках" : "Нужна заметка"}</small>
+                <span>{entry.body}</span>
+                <small>Документ в рабочем пространстве</small>
               </button>
             ))}
           </div>

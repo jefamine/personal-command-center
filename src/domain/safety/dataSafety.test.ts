@@ -9,6 +9,8 @@ const note: Note = {
   projectId: null,
   tags: [],
   pinned: false,
+  contentUpdatedAt: "2026-07-17T08:00:00.000Z",
+  reflection: null,
   createdAt: "2026-07-17T08:00:00.000Z",
   updatedAt: "2026-07-17T08:00:00.000Z"
 };

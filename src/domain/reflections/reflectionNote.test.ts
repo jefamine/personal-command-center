@@ -1,83 +1,61 @@
 import { describe, expect, it } from "vitest";
-import type { ReflectionEntry } from "../../types";
+import type { Note } from "../../types";
 import {
   buildReflectionNoteTitle,
   createReflectionNote,
-  hasLinkedReflectionNote
+  isReflectionDocument,
+  reflectionDocuments
 } from "./reflectionNote";
 
-function reflection(overrides: Partial<ReflectionEntry> = {}): ReflectionEntry {
-  return {
-    id: "reflection-1",
-    noteId: null,
-    originalText: "Хочу выделить спокойное время на чтение.",
-    status: "captured",
-    analysis: null,
-    correction: null,
-    analysisRequestId: null,
-    analysisRequestDigest: null,
-    analysisRequestedAt: null,
-    analysisSourceUpdatedAt: null,
-    analysisContextSections: [],
-    analysisProfileUpdatedAt: null,
-    analysisMemoryRefs: [],
-    suggestions: [],
-    createdAt: "2026-07-15T08:30:00.000Z",
-    updatedAt: "2026-07-15T08:30:00.000Z",
-    confirmedAt: null,
-    ...overrides
-  };
-}
+const createdAt = "2026-07-15T08:30:00.000Z";
 
-describe("reflection note", () => {
-  it("берёт первую содержательную строку и сохраняет исходный текст без изменений", () => {
-    const originalText = "\n   \n  Хочу понять свой рабочий ритм   \nВторая строка остаётся в тексте.\n";
-    const note = createReflectionNote(reflection({ originalText }), "note-1");
+describe("reflection document", () => {
+  it("creates one canonical document and preserves the source text", () => {
+    const text = "\n   \n  Хочу понять свой рабочий ритм   \nВторая строка остаётся в тексте.\n";
+    const note = createReflectionNote(text, "note-1", createdAt);
 
     expect(note.title).toBe("Осмысление: Хочу понять свой рабочий ритм");
-    expect(note.body).toBe(originalText);
+    expect(note.body).toBe(text);
     expect(note.id).toBe("note-1");
     expect(note.tags).toEqual(["осмысление"]);
     expect(note.origin).toBe("reflection");
-    expect(note.projectId).toBeNull();
-    expect(note.pinned).toBe(false);
-    expect(note.createdAt).toBe("2026-07-15T08:30:00.000Z");
-    expect(note.updatedAt).toBe(note.createdAt);
+    expect(note.contentUpdatedAt).toBe(createdAt);
+    expect(note.reflection.status).toBe("captured");
   });
 
-  it("ограничивает длинный русский заголовок 72 символами", () => {
-    const title = buildReflectionNoteTitle(
-      reflection({
-        originalText:
-          "Мне важно сохранить достаточно длинную и содержательную мысль, но не превращать её в громоздкий заголовок заметки"
-      })
+  it("limits a long title and uses the date for blank text", () => {
+    const long = createReflectionNote(
+      "Мне важно сохранить достаточно длинную и содержательную мысль, но не превращать её в громоздкий заголовок заметки",
+      "long",
+      createdAt
     );
+    expect(buildReflectionNoteTitle(long).length).toBeLessThanOrEqual(72);
+    expect(buildReflectionNoteTitle(long).endsWith("…")).toBe(true);
 
-    expect(title.length).toBeLessThanOrEqual(72);
-    expect(title.endsWith("…")).toBe(true);
+    const blank = createReflectionNote(" \r\n\t", "blank", "2026-07-15T23:50:00.000Z");
+    expect(blank.title).toBe("Осмысление · 15.07.2026");
   });
 
-  it("использует дату как понятный заголовок для пустого текста", () => {
-    expect(
-      buildReflectionNoteTitle(reflection({ originalText: " \r\n\t", createdAt: "2026-07-15T23:50:00.000Z" }))
-    ).toBe("Осмысление · 15.07.2026");
-  });
+  it("derives the Осмысление view from documents instead of a second entity list", () => {
+    const reflection = createReflectionNote("Мысль", "reflection", createdAt);
+    const tagged: Note = {
+      id: "tagged",
+      title: "Документ",
+      body: "Текст",
+      projectId: null,
+      tags: ["осмысление"],
+      pinned: false,
+      contentUpdatedAt: createdAt,
+      reflection: null,
+      createdAt,
+      updatedAt: createdAt
+    };
+    const regular: Note = { ...tagged, id: "regular", tags: [] };
 
-  it("даёт стабильный id — связанный, явно переданный или производный", () => {
-    expect(createReflectionNote(reflection({ noteId: "linked-note" })).id).toBe("linked-note");
-    expect(createReflectionNote(reflection({ noteId: "linked-note" }), "chosen-note").id).toBe(
-      "chosen-note"
-    );
-    expect(createReflectionNote(reflection()).id).toBe("reflection-note-reflection-1");
-    expect(createReflectionNote(reflection()).id).toBe(createReflectionNote(reflection()).id);
-  });
-
-  it("проверяет не только ссылку, но при необходимости и наличие заметки", () => {
-    const linked = reflection({ noteId: "note-1" });
-
-    expect(hasLinkedReflectionNote(linked)).toBe(true);
-    expect(hasLinkedReflectionNote(linked, [{ id: "note-1" }])).toBe(true);
-    expect(hasLinkedReflectionNote(linked, [{ id: "another-note" }])).toBe(false);
-    expect(hasLinkedReflectionNote(reflection(), [{ id: "note-1" }])).toBe(false);
+    expect(isReflectionDocument(reflection)).toBe(true);
+    expect(reflectionDocuments([reflection, tagged, regular]).map((note) => note.id)).toEqual([
+      "reflection",
+      "tagged"
+    ]);
   });
 });

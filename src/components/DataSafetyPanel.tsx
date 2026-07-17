@@ -22,7 +22,6 @@ import type { RecoverableEntityKind } from "../types";
 const kindLabels: Record<RecoverableEntityKind, string> = {
   task: "Задача",
   note: "Документ",
-  reflection: "Запись",
   event: "Событие",
   object: "Объект"
 };

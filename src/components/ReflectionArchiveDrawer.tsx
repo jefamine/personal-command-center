@@ -2,7 +2,6 @@ import {
   Brain,
   Check,
   ChevronDown,
-  FilePlus2,
   FileText,
   Link2Off,
   NotebookPen,
@@ -17,10 +16,11 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useDashboard } from "../state/DashboardContext";
+import { reflectionDocuments } from "../domain/reflections/reflectionNote";
 import type {
   AssistantMemoryItem,
   AssistantMemoryStatus,
-  ReflectionEntry,
+  ReflectionDocument,
   ReflectionSuggestion,
   ReflectionStatus
 } from "../types";
@@ -78,17 +78,17 @@ function normalizeSearch(value: string) {
   return value.trim().toLocaleLowerCase("ru-RU");
 }
 
-function reflectionSearchText(entry: ReflectionEntry) {
+function reflectionSearchText(entry: ReflectionDocument) {
   return [
-    entry.originalText,
-    entry.correction,
-    entry.analysis?.understanding,
-    entry.analysis?.possibleExplanation,
-    entry.analysis?.question,
-    entry.analysis?.proposedAction,
-    ...(entry.suggestions ?? []).flatMap((suggestion) => [suggestion.sourceText, suggestion.text]),
-    ...(entry.analysis?.observations ?? []),
-    ...(entry.analysis?.alternatives ?? [])
+    entry.body,
+    entry.reflection.correction,
+    entry.reflection.analysis?.understanding,
+    entry.reflection.analysis?.possibleExplanation,
+    entry.reflection.analysis?.question,
+    entry.reflection.analysis?.proposedAction,
+    ...entry.reflection.suggestions.flatMap((suggestion) => [suggestion.sourceText, suggestion.text]),
+    ...(entry.reflection.analysis?.observations ?? []),
+    ...(entry.reflection.analysis?.alternatives ?? [])
   ].filter(Boolean).join(" ");
 }
 
@@ -106,8 +106,8 @@ const ARCHIVE_SUGGESTION_STATUS: Record<ReflectionSuggestion["status"], string> 
 
 function memorySource(
   item: AssistantMemoryItem,
-  reflections: ReflectionEntry[]
-): { label: string; reflection: ReflectionEntry | null; missing: boolean; stale: boolean } {
+  reflections: ReflectionDocument[]
+): { label: string; reflection: ReflectionDocument | null; missing: boolean; stale: boolean } {
   if (item.sourceType === "manual") {
     return { label: "Добавлено вручную", reflection: null, missing: false, stale: false };
   }
@@ -130,12 +130,12 @@ function ArchivedUsedMemory({
   entry,
   memory
 }: {
-  entry: ReflectionEntry;
+  entry: ReflectionDocument;
   memory: AssistantMemoryItem[];
 }) {
-  const references = entry.analysisMemoryRefs ?? [];
+  const references = entry.reflection.analysisMemoryRefs;
   if (!references.length) return null;
-  const queued = entry.status === "queued";
+  const queued = entry.reflection.status === "queued";
 
   return (
     <details className="reflection-used-memory is-archive">
@@ -170,14 +170,12 @@ function ArchivedUsedMemory({
 
 function ArchivedSuggestions({
   entry,
-  notes,
   tasks
 }: {
-  entry: ReflectionEntry;
-  notes: Array<{ id: string }>;
+  entry: ReflectionDocument;
   tasks: Array<{ id: string; status: string }>;
 }) {
-  const suggestions = entry.suggestions ?? [];
+  const suggestions = entry.reflection.suggestions;
   if (!suggestions.length) return null;
   const accepted = suggestions.filter((suggestion) => suggestion.status === "accepted").length;
   const pending = suggestions.filter((suggestion) => suggestion.status === "pending").length;
@@ -198,11 +196,6 @@ function ArchivedSuggestions({
       </summary>
       <div className="reflection-archive-suggestions-list">
         {suggestions.map((suggestion) => {
-          const linkedNoteExists = Boolean(
-            suggestion.addedToNoteAt &&
-            entry.noteId &&
-            notes.some((note) => note.id === entry.noteId)
-          );
           const linkedTask = suggestion.createdTaskId
             ? tasks.find((task) => task.id === suggestion.createdTaskId) ?? null
             : null;
@@ -212,7 +205,7 @@ function ArchivedSuggestions({
               ? linkedTask.status === "inbox" ? "Во входящих" : "Связанная задача существует"
               : "Связанная задача удалена";
           } else if (suggestion.kind !== "next_action" && suggestion.addedToNoteAt) {
-            artifactCopy = linkedNoteExists ? "В заметке" : "Связанная заметка удалена";
+            artifactCopy = "В документе";
           }
           return (
             <article key={suggestion.id} className={`reflection-archive-suggestion is-${suggestion.status}`}>
@@ -239,14 +232,13 @@ export function ReflectionArchiveDrawer({
 }: ReflectionArchiveDrawerProps) {
   const {
     state,
-    ensureReflectionNote,
     rememberReflection,
     addAssistantMemory,
     updateAssistantMemory,
     removeAssistantMemory,
     removeReflection
   } = useDashboard();
-  const reflections = state.reflections ?? [];
+  const reflections = useMemo(() => reflectionDocuments(state.notes), [state.notes]);
   const assistantMemory = state.assistantMemory ?? [];
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
@@ -259,7 +251,6 @@ export function ReflectionArchiveDrawer({
   const [manualMemory, setManualMemory] = useState("");
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
   const [editingMemoryText, setEditingMemoryText] = useState("");
-  const [noteBusyId, setNoteBusyId] = useState<string | null>(null);
   const [expandedReflectionIds, setExpandedReflectionIds] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
 
@@ -315,7 +306,7 @@ export function ReflectionArchiveDrawer({
   );
   const filteredReflections = useMemo(
     () => sortedReflections.filter((entry) => {
-      if (reflectionFilter !== "all" && entry.status !== reflectionFilter) return false;
+      if (reflectionFilter !== "all" && entry.reflection.status !== reflectionFilter) return false;
       return !search || normalizeSearch(reflectionSearchText(entry)).includes(search);
     }),
     [reflectionFilter, search, sortedReflections]
@@ -332,7 +323,9 @@ export function ReflectionArchiveDrawer({
   );
   const reflectionCounts = useMemo(() => {
     const counts = new Map<ReflectionFilter, number>([["all", reflections.length]]);
-    for (const entry of reflections) counts.set(entry.status, (counts.get(entry.status) ?? 0) + 1);
+    for (const entry of reflections) {
+      counts.set(entry.reflection.status, (counts.get(entry.reflection.status) ?? 0) + 1);
+    }
     return counts;
   }, [reflections]);
   const memoryCounts = useMemo(() => ({
@@ -348,29 +341,21 @@ export function ReflectionArchiveDrawer({
     onClose();
   };
 
-  const createReflectionNote = async (id: string) => {
-    setNoteBusyId(id);
-    setNotice("");
-    try {
-      await Promise.resolve(ensureReflectionNote(id));
-      setNotice("Заметка создана и готова к экспорту в Obsidian.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось создать заметку.");
-    } finally {
-      setNoteBusyId(null);
-    }
-  };
-
-  const beginRemembering = (entry: ReflectionEntry) => {
+  const beginRemembering = (entry: ReflectionDocument) => {
     const existing = assistantMemory.find(
-      (item) => item.sourceType === "reflection" && item.sourceId === entry.id
+      (item) => item.sourceType === "document" && item.sourceId === entry.id
     );
     setRememberingId(entry.id);
-    setRememberDraft((existing?.text || entry.correction || entry.analysis?.understanding || "").trim());
+    setRememberDraft((
+      existing?.text ||
+      entry.reflection.correction ||
+      entry.reflection.analysis?.understanding ||
+      ""
+    ).trim());
     setNotice("");
   };
 
-  const saveReflectionMemory = (entry: ReflectionEntry) => {
+  const saveReflectionMemory = (entry: ReflectionDocument) => {
     const text = rememberDraft.trim();
     if (!text) return;
     rememberReflection(entry.id, text);
@@ -396,17 +381,17 @@ export function ReflectionArchiveDrawer({
     setNotice("Формулировка обновлена.");
   };
 
-  const deleteReflection = (entry: ReflectionEntry) => {
+  const deleteReflection = (entry: ReflectionDocument) => {
     if (entry.id === protectedEntryId) {
       setNotice("Сначала завершается безопасное сохранение разбора. Удаление станет доступно после очистки локальной очереди.");
       return;
     }
-    if (entry.status === "queued") {
+    if (entry.reflection.status === "queued") {
       setNotice("Сначала откройте запись и отмените ожидающий разбор — так локальная очередь не останется занятой.");
       return;
     }
     const confirmed = window.confirm(
-      "Удалить эту запись и её разбор?\n\nСвязанная заметка и элементы памяти останутся — их можно удалить отдельно. Это действие нельзя отменить."
+      "Удалить этот документ и его разбор?\n\nЭлементы памяти останутся — их можно удалить отдельно. Документ можно будет восстановить из корзины."
     );
     if (!confirmed) return;
     removeReflection(entry.id);
@@ -414,12 +399,12 @@ export function ReflectionArchiveDrawer({
       setRememberingId(null);
       setRememberDraft("");
     }
-    setNotice("Запись удалена. Связанные заметки и память не изменены.");
+    setNotice("Документ перемещён в корзину. Память не изменена.");
   };
 
   const deleteMemory = (item: AssistantMemoryItem) => {
     if (!window.confirm(
-      "Удалить эту формулировку из памяти помощника?\n\nЕсли она уже отправлена в незавершённом запросе, одноразовая копия может оставаться в локальной очереди до завершения или отмены. В истории скрытая копия не хранится: там появится отметка об удалении. Исходная запись или заметка останется."
+      "Удалить эту формулировку из памяти помощника?\n\nЕсли она уже отправлена в незавершённом запросе, одноразовая копия может оставаться в локальной очереди до завершения или отмены. В истории скрытая копия не хранится: там появится отметка об удалении. Исходный документ останется."
     )) return;
     removeAssistantMemory(item.id);
     if (editingMemoryId === item.id) {
@@ -452,7 +437,7 @@ export function ReflectionArchiveDrawer({
             <span className="reflection-archive-heading-icon"><NotebookPen size={21} /></span>
             <div>
               <span>Личное пространство</span>
-              <h2 id="reflection-archive-title">История и память</h2>
+              <h2 id="reflection-archive-title">Осмысление и память</h2>
             </div>
           </div>
           <button ref={closeButtonRef} type="button" className="reflection-archive-close" onClick={onClose} aria-label="Закрыть историю">
@@ -460,7 +445,7 @@ export function ReflectionArchiveDrawer({
           </button>
         </header>
 
-        <div className="reflection-archive-tabs" role="tablist" aria-label="История и память">
+        <div className="reflection-archive-tabs" role="tablist" aria-label="Осмысление и память">
           <button
             id="reflection-archive-tab-reflections"
             type="button"
@@ -472,7 +457,7 @@ export function ReflectionArchiveDrawer({
             onClick={() => { setTab("reflections"); setNotice(""); }}
             onKeyDown={handleTabKeyDown}
           >
-            <NotebookPen size={17} /> Записи <span>{reflections.length}</span>
+            <NotebookPen size={17} /> Документы <span>{reflections.length}</span>
           </button>
           <button
             id="reflection-archive-tab-memory"
@@ -494,16 +479,16 @@ export function ReflectionArchiveDrawer({
             <Search size={18} />
             <input
               type="search"
-              aria-label={tab === "reflections" ? "Поиск в записях и разборах" : "Поиск в памяти"}
+              aria-label={tab === "reflections" ? "Поиск в документах и разборах" : "Поиск в памяти"}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={tab === "reflections" ? "Найти в записях и разборах" : "Найти в памяти"}
+              placeholder={tab === "reflections" ? "Найти в документах и разборах" : "Найти в памяти"}
             />
             {query ? <button type="button" onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={16} /></button> : null}
           </div>
 
           {tab === "reflections" ? (
-            <div className="reflection-archive-filters" aria-label="Статус записи">
+            <div className="reflection-archive-filters" aria-label="Статус документа">
               {REFLECTION_FILTERS.map((filter) => (
                 <button
                   key={filter.value}
@@ -544,26 +529,30 @@ export function ReflectionArchiveDrawer({
               className="reflection-archive-panel"
             >
               <div className="reflection-archive-panel-intro">
-                <div><strong>{filteredReflections.length}</strong><span>{query || reflectionFilter !== "all" ? "найдено" : "всего записей"}</span></div>
-                <p>Здесь хранится полный исходный текст — независимо от того, отправлялся ли он на разбор.</p>
+                <div><strong>{filteredReflections.length}</strong><span>{query || reflectionFilter !== "all" ? "найдено" : "всего документов"}</span></div>
+                <p>Это документы рабочего пространства с тегом «осмысление», а не отдельные копии заметок.</p>
               </div>
 
               {filteredReflections.length ? (
                 <div className="reflection-archive-list">
                   {filteredReflections.map((entry) => {
-                    const linkedNote = Boolean(entry.noteId && state.notes.some((note) => note.id === entry.noteId));
-                    const linkedMemory = assistantMemory.find((item) => item.sourceType === "reflection" && item.sourceId === entry.id) ?? null;
-                    const canRemember = (entry.status === "confirmed" || entry.status === "corrected") && Boolean(entry.analysis);
+                    const linkedMemory = assistantMemory.find((item) =>
+                      item.sourceType === "document" && item.sourceId === entry.id
+                    ) ?? null;
+                    const canRemember = (
+                      entry.reflection.status === "confirmed" ||
+                      entry.reflection.status === "corrected"
+                    ) && Boolean(entry.reflection.analysis);
                     const remembering = rememberingId === entry.id;
-                    const longOriginal = entry.originalText.length > 240 || entry.originalText.split(/\r?\n/).length > 4;
+                    const longOriginal = entry.body.length > 240 || entry.body.split(/\r?\n/).length > 4;
                     const originalExpanded = expandedReflectionIds.includes(entry.id);
                     return (
                       <article key={entry.id} className="reflection-archive-card">
                         <div className="reflection-archive-card-meta">
                           <time dateTime={entry.createdAt}>{formatDate(entry.createdAt)}</time>
-                          <span className={`reflection-archive-status is-${entry.status}`}>{REFLECTION_STATUS_COPY[entry.status]}</span>
+                          <span className={`reflection-archive-status is-${entry.reflection.status}`}>{REFLECTION_STATUS_COPY[entry.reflection.status]}</span>
                         </div>
-                        <p className={`reflection-archive-original ${longOriginal && !originalExpanded ? "is-clamped" : ""}`}>{entry.originalText}</p>
+                        <p className={`reflection-archive-original ${longOriginal && !originalExpanded ? "is-clamped" : ""}`}>{entry.body}</p>
                         {longOriginal ? (
                           <button
                             type="button"
@@ -579,20 +568,20 @@ export function ReflectionArchiveDrawer({
                           </button>
                         ) : null}
 
-                        {entry.analysis?.understanding ? (
+                        {entry.reflection.analysis?.understanding ? (
                           <div className="reflection-archive-understanding">
                             <span><Sparkles size={14} /> Я понял</span>
-                            <p>{entry.analysis.understanding}</p>
+                            <p>{entry.reflection.analysis.understanding}</p>
                           </div>
                         ) : null}
-                        {entry.correction ? (
+                        {entry.reflection.correction ? (
                           <div className="reflection-archive-correction">
                             <span><PencilLine size={14} /> Ваша поправка</span>
-                            <p>{entry.correction}</p>
+                            <p>{entry.reflection.correction}</p>
                           </div>
                         ) : null}
                         <ArchivedUsedMemory entry={entry} memory={assistantMemory} />
-                        <ArchivedSuggestions entry={entry} notes={state.notes} tasks={state.tasks} />
+                        <ArchivedSuggestions entry={entry} tasks={state.tasks} />
 
                         {remembering ? (
                           <div className="reflection-archive-remember-editor">
@@ -613,15 +602,6 @@ export function ReflectionArchiveDrawer({
 
                         <div className="reflection-archive-card-actions">
                           <button type="button" className="secondary-button" onClick={() => openReflection(entry.id)}><FileText size={16} /> Открыть</button>
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={() => void createReflectionNote(entry.id)}
-                            disabled={linkedNote || noteBusyId === entry.id}
-                          >
-                            {linkedNote ? <Check size={16} /> : <FilePlus2 size={16} />}
-                            {linkedNote ? "В заметках" : noteBusyId === entry.id ? "Создаю…" : "Создать заметку"}
-                          </button>
                           {canRemember ? (
                             <button
                               type="button"
@@ -637,16 +617,16 @@ export function ReflectionArchiveDrawer({
                             type="button"
                             className="reflection-archive-delete"
                             onClick={() => deleteReflection(entry)}
-                            disabled={entry.status === "queued" || entry.id === protectedEntryId}
+                            disabled={entry.reflection.status === "queued" || entry.id === protectedEntryId}
                             title={entry.id === protectedEntryId
                               ? "Сначала завершается безопасное сохранение разбора"
-                              : entry.status === "queued"
+                              : entry.reflection.status === "queued"
                                 ? "Сначала откройте запись и отмените ожидающий разбор"
                                 : undefined}
                           >
                             <Trash2 size={16} /> {entry.id === protectedEntryId
                               ? "Сохраняю разбор"
-                              : entry.status === "queued"
+                              : entry.reflection.status === "queued"
                                 ? "Сначала отменить разбор"
                                 : "Удалить"}
                           </button>
@@ -658,8 +638,8 @@ export function ReflectionArchiveDrawer({
               ) : (
                 <div className="reflection-archive-empty">
                   <NotebookPen size={25} />
-                  <strong>{reflections.length ? "Ничего не найдено" : "Здесь появятся ваши записи"}</strong>
-                  <p>{reflections.length ? "Попробуйте изменить запрос или фильтр." : "Запишите первую мысль в виджете «Записать и осмыслить»."}</p>
+                  <strong>{reflections.length ? "Ничего не найдено" : "Здесь появятся ваши документы"}</strong>
+                  <p>{reflections.length ? "Попробуйте изменить запрос или фильтр." : "Сохраните первую мысль в виджете «Записать и осмыслить»."}</p>
                 </div>
               )}
             </section>

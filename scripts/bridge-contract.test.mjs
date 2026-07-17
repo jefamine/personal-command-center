@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../src/data/seed.ts";
+import { createReflectionNote } from "../src/domain/reflections/reflectionNote.ts";
 import { buildCodexSnapshot } from "../src/lib/codexBridge.ts";
 import {
   BridgeContractError,
@@ -20,24 +21,15 @@ describe("Codex bridge snapshot contract", () => {
     const state = createInitialState();
     const now = new Date().toISOString();
     state.integrations.codex.snapshotScope.journal = true;
-    state.reflections = [{
-      id: "reflection-1",
-      noteId: "note-1",
-      originalText: "Точная исходная запись",
-      status: "corrected",
-      analysis: null,
-      correction: "Уточнённая формулировка",
-      analysisRequestId: null,
-      analysisRequestDigest: null,
-      analysisRequestedAt: null,
-      analysisSourceUpdatedAt: null,
-      analysisContextSections: [],
-      analysisProfileUpdatedAt: null,
-      analysisMemoryRefs: [],
-      suggestions: [],
-      createdAt: now,
-      updatedAt: now,
-      confirmedAt: now
+    const document = createReflectionNote("Точная исходная запись", "reflection-1", now);
+    state.notes = [{
+      ...document,
+      reflection: {
+        ...document.reflection,
+        status: "corrected",
+        correction: "Уточнённая формулировка",
+        confirmedAt: now
+      }
     }];
 
     const snapshot = buildCodexSnapshot(state);

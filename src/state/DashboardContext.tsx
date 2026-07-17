@@ -37,11 +37,16 @@ import {
   eventTrashEntry,
   noteTrashEntry,
   objectTrashEntry,
-  reflectionTrashEntry,
   taskTrashEntry
 } from "../domain/safety/dataSafety";
 import { createDefaultPersonalContext, normalizePersonalContext } from "../domain/profile/personalContext";
-import { createReflectionNote } from "../domain/reflections/reflectionNote";
+import {
+  createReflectionMetadata,
+  createReflectionNote,
+  isReflectionDocument,
+  REFLECTION_TAG,
+  reflectionContentUpdatedAt
+} from "../domain/reflections/reflectionNote";
 import { memoryReferencesFromProjection } from "../domain/reflections/reflectionMemory";
 import {
   decideReflectionSuggestionValue,
@@ -72,7 +77,7 @@ import type {
   ReadingItem,
   ReadingItemDraft,
   ReflectionAnalysisResponse,
-  ReflectionEntry,
+  ReflectionDocument,
   ReflectionMemoryProjection,
   ReflectionSuggestionStatus,
   Task,
@@ -104,7 +109,7 @@ interface DashboardContextValue {
   addNote: (draft: NoteDraft) => Note;
   updateNote: (id: string, changes: NoteUpdate) => void;
   removeNote: (id: string) => void;
-  addReflection: (text: string) => ReflectionEntry;
+  addReflection: (text: string) => ReflectionDocument;
   ensureReflectionNote: (id: string) => Note | null;
   markReflectionQueued: (
     id: string,
@@ -169,28 +174,32 @@ interface DashboardContextValue {
 const DashboardContext = createContext<DashboardContextValue | null>(null);
 
 export function acceptReflectionAnalysis(
-  entry: ReflectionEntry,
+  entry: ReflectionDocument,
   response: ReflectionAnalysisResponse,
   updatedAt: string
-): ReflectionEntry | null {
+): ReflectionDocument | null {
+  const workflow = entry.reflection;
   if (
-    entry.status !== "queued" ||
+    workflow.status !== "queued" ||
     entry.id !== response.entryId ||
-    entry.analysisRequestId !== response.requestId ||
-    entry.analysisRequestDigest !== response.requestDigest ||
-    entry.analysisSourceUpdatedAt !== response.sourceUpdatedAt ||
+    workflow.analysisRequestId !== response.requestId ||
+    workflow.analysisRequestDigest !== response.requestDigest ||
+    workflow.analysisSourceUpdatedAt !== response.sourceUpdatedAt ||
     response.analysis.requestId !== response.requestId
   ) {
     return null;
   }
   return {
     ...entry,
-    status: "analyzed",
-    analysis: response.analysis,
-    suggestions: deriveReflectionSuggestions(response.analysis, updatedAt),
-    correction: null,
-    updatedAt,
-    confirmedAt: null
+    reflection: {
+      ...workflow,
+      status: "analyzed",
+      analysis: response.analysis,
+      suggestions: deriveReflectionSuggestions(response.analysis, updatedAt),
+      correction: null,
+      confirmedAt: null
+    },
+    updatedAt
   };
 }
 
@@ -212,16 +221,24 @@ function appendMarkdownSection(body: string, section: string): string {
   return `${body}${separator}${section}`;
 }
 
-function availableReflectionNoteId(reflectionId: string, notes: Note[]): string {
-  const base = `reflection-note-${reflectionId}`;
-  if (!notes.some((note) => note.id === base)) return base;
-  let suffix = 2;
-  while (notes.some((note) => note.id === `${base}-${suffix}`)) suffix += 1;
-  return `${base}-${suffix}`;
+function hasReflectionTag(tags: readonly string[]): boolean {
+  return tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === REFLECTION_TAG);
 }
 
 /** Applies only editable note fields and preserves durable privacy provenance. */
 export function applyNoteUpdate(note: Note, changes: NoteUpdate, updatedAt: string): Note {
+  const bodyChanged = typeof changes.body === "string" && changes.body !== note.body;
+  const nextTags = Array.isArray(changes.tags) && changes.tags.every((tag) => typeof tag === "string")
+    ? [...changes.tags]
+    : note.tags;
+  const isReflection = Boolean(note.reflection) || note.origin === "reflection" || hasReflectionTag(nextTags);
+  const previousWorkflow = note.reflection ?? (isReflection ? createReflectionMetadata() : null);
+  const reflection = bodyChanged && previousWorkflow?.status === "queued"
+    ? {
+        ...createReflectionMetadata(),
+        analysisSourceText: null
+      }
+    : previousWorkflow;
   const next: Note = {
     ...note,
     ...(typeof changes.title === "string" ? { title: changes.title } : {}),
@@ -229,12 +246,12 @@ export function applyNoteUpdate(note: Note, changes: NoteUpdate, updatedAt: stri
     ...(changes.projectId === null || typeof changes.projectId === "string"
       ? { projectId: changes.projectId }
       : {}),
-    ...(Array.isArray(changes.tags) && changes.tags.every((tag) => typeof tag === "string")
-      ? { tags: [...changes.tags] }
-      : {}),
+    tags: nextTags,
     ...(typeof changes.pinned === "boolean" ? { pinned: changes.pinned } : {}),
     id: note.id,
     origin: note.origin,
+    contentUpdatedAt: bodyChanged ? updatedAt : note.contentUpdatedAt,
+    reflection,
     createdAt: note.createdAt,
     updatedAt
   };
@@ -679,6 +696,8 @@ export function DashboardProvider({ children }: PropsWithChildren) {
             : null,
         tags: draft.tags ?? [],
         pinned: draft.pinned ?? false,
+        contentUpdatedAt: now,
+        reflection: hasReflectionTag(draft.tags ?? []) ? createReflectionMetadata() : null,
         createdAt: now,
         updatedAt: now
       };
@@ -724,19 +743,6 @@ export function DashboardProvider({ children }: PropsWithChildren) {
           ...current,
           notes: current.notes.filter((note) => note.id !== id),
           trash: [trashed, ...current.trash],
-          reflections: current.reflections.map((entry) =>
-            entry.noteId === id && entry.suggestions.some((suggestion) => suggestion.addedToNoteAt)
-              ? {
-                  ...entry,
-                  suggestions: entry.suggestions.map((suggestion) =>
-                    suggestion.addedToNoteAt
-                      ? { ...suggestion, addedToNoteAt: null, updatedAt: now }
-                      : suggestion
-                  ),
-                  updatedAt: now
-                }
-              : entry
-          ),
           activityLog: withActivity(current, "entity_trashed", id, { kind: "note" })
         };
       });
@@ -748,84 +754,25 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (text: string) => {
       if (!text.trim()) throw new Error("Запись не может быть пустой.");
       const now = new Date().toISOString();
-      const reflectionId = crypto.randomUUID();
-      const noteId = `reflection-note-${reflectionId}`;
-      const reflection: ReflectionEntry = {
-        id: reflectionId,
-        noteId,
-        originalText: text,
-        status: "captured",
-        analysis: null,
-        correction: null,
-        analysisRequestId: null,
-        analysisRequestDigest: null,
-        analysisRequestedAt: null,
-        analysisSourceUpdatedAt: null,
-        analysisContextSections: [],
-        analysisProfileUpdatedAt: null,
-        analysisMemoryRefs: [],
-        suggestions: [],
-        createdAt: now,
-        updatedAt: now,
-        confirmedAt: null
-      };
-      const note = createReflectionNote(reflection, noteId);
+      const note = createReflectionNote(text, crypto.randomUUID(), now);
       mutate((current) => ({
         ...current,
-        reflections: [reflection, ...current.reflections],
         notes: [note, ...current.notes],
-        activityLog: withActivity(current, "reflection_created", reflection.id, {
+        activityLog: withActivity(current, "reflection_created", note.id, {
           characters: text.length,
-          noteCreated: true
+          documentCreated: true
         })
       }));
-      return reflection;
+      return note;
     },
     [mutate]
   );
 
   const ensureReflectionNote = useCallback(
     (id: string) => {
-      const reflection = state.reflections.find((entry) => entry.id === id);
-      if (!reflection) return null;
-      const linked = reflection.noteId
-        ? state.notes.find((note) => note.id === reflection.noteId) ?? null
-        : null;
-      if (linked) return linked;
-
-      const noteId = reflection.noteId ?? `reflection-note-${reflection.id}`;
-      const note = createReflectionNote(reflection, noteId);
-      mutate((current) => {
-        const currentReflection = current.reflections.find((entry) => entry.id === id);
-        if (!currentReflection) return current;
-        const existing = current.notes.find((entry) =>
-          entry.id === currentReflection.noteId || entry.id === noteId
-        );
-        if (existing && currentReflection.noteId === existing.id) return current;
-        return {
-          ...current,
-          notes: existing ? current.notes : [note, ...current.notes],
-          reflections: current.reflections.map((entry) =>
-            entry.id === id
-              ? {
-                  ...entry,
-                  noteId: existing?.id ?? noteId,
-                  suggestions: existing
-                    ? entry.suggestions
-                    : entry.suggestions.map((suggestion) =>
-                        suggestion.addedToNoteAt
-                          ? { ...suggestion, addedToNoteAt: null }
-                          : suggestion
-                      )
-                }
-              : entry
-          ),
-          activityLog: withActivity(current, "reflection_note_created", id)
-        };
-      });
-      return note;
+      return state.notes.find((note) => note.id === id && isReflectionDocument(note)) ?? null;
     },
-    [mutate, state.notes, state.reflections]
+    [state.notes]
   );
 
   const markReflectionQueued = useCallback(
@@ -841,35 +788,40 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       if (!requestId || !sourceUpdatedAt || !requestDigest) return;
       const analysisMemoryRefs = memoryReferencesFromProjection(memory);
       mutate((current) => {
-        const reflection = current.reflections.find((entry) => entry.id === id);
+        const reflection = current.notes.find((entry) => entry.id === id);
         if (
           !reflection ||
-          reflection.updatedAt !== sourceUpdatedAt ||
-          reflection.status === "confirmed" ||
-          reflection.status === "corrected"
+          !isReflectionDocument(reflection) ||
+          reflectionContentUpdatedAt(reflection) !== sourceUpdatedAt ||
+          reflection.reflection.status === "confirmed" ||
+          reflection.reflection.status === "corrected"
         ) {
           return current;
         }
         const now = new Date().toISOString();
         return {
           ...current,
-          reflections: current.reflections.map((entry) =>
+          notes: current.notes.map((entry) =>
             entry.id === id
               ? {
                   ...entry,
-                  status: "queued" as const,
-                  analysis: null,
-                  correction: null,
-                  analysisRequestId: requestId,
-                  analysisRequestDigest: requestDigest,
-                  analysisRequestedAt: now,
-                  analysisSourceUpdatedAt: sourceUpdatedAt,
-                  analysisContextSections: [...contextSections],
-                  analysisProfileUpdatedAt: profileUpdatedAt,
-                  analysisMemoryRefs: analysisMemoryRefs.map((reference) => ({ ...reference })),
-                  suggestions: [],
+                  reflection: {
+                    ...reflection.reflection,
+                    status: "queued" as const,
+                    analysis: null,
+                    correction: null,
+                    analysisRequestId: requestId,
+                    analysisRequestDigest: requestDigest,
+                    analysisRequestedAt: now,
+                    analysisSourceUpdatedAt: sourceUpdatedAt,
+                    analysisSourceText: reflection.body,
+                    analysisContextSections: [...contextSections],
+                    analysisProfileUpdatedAt: profileUpdatedAt,
+                    analysisMemoryRefs: analysisMemoryRefs.map((reference) => ({ ...reference })),
+                    suggestions: [],
+                    confirmedAt: null
+                  },
                   updatedAt: now,
-                  confirmedAt: null
                 }
               : entry
           ),
@@ -886,24 +838,31 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   const cancelReflectionRequest = useCallback(
     (id: string) => {
       mutate((current) => {
-        const reflection = current.reflections.find((entry) => entry.id === id);
-        if (!reflection || reflection.status !== "queued") return current;
+        const reflection = current.notes.find((entry) => entry.id === id);
+        if (!reflection || !isReflectionDocument(reflection) || reflection.reflection.status !== "queued") {
+          return current;
+        }
         const now = new Date().toISOString();
         return {
           ...current,
-          reflections: current.reflections.map((entry) =>
+          notes: current.notes.map((entry) =>
             entry.id === id
               ? {
                   ...entry,
-                  status: "captured" as const,
-                  analysisRequestId: null,
-                  analysisRequestDigest: null,
-                  analysisRequestedAt: null,
-                  analysisSourceUpdatedAt: null,
-                  analysisContextSections: [],
-                  analysisProfileUpdatedAt: null,
-                  analysisMemoryRefs: [],
-                  suggestions: [],
+                  reflection: {
+                    ...reflection.reflection,
+                    status: "captured" as const,
+                    analysisRequestId: null,
+                    analysisRequestDigest: null,
+                    analysisRequestedAt: null,
+                    analysisSourceUpdatedAt: null,
+                    analysisSourceText: null,
+                    analysisContextSections: [],
+                    analysisProfileUpdatedAt: null,
+                    analysisMemoryRefs: [],
+                    suggestions: [],
+                    confirmedAt: null
+                  },
                   updatedAt: now
                 }
               : entry
@@ -918,8 +877,8 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   const applyReflectionAnalysis = useCallback(
     (response: ReflectionAnalysisResponse) => {
       mutate((current) => {
-        const existing = current.reflections.find((entry) => entry.id === response.entryId);
-        if (!existing) return current;
+        const existing = current.notes.find((entry) => entry.id === response.entryId);
+        if (!existing || !isReflectionDocument(existing)) return current;
         const accepted = acceptReflectionAnalysis(
           existing,
           response,
@@ -928,7 +887,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         if (!accepted) return current;
         return {
           ...current,
-          reflections: current.reflections.map((entry) =>
+          notes: current.notes.map((entry) =>
             entry.id === accepted.id ? accepted : entry
           ),
           activityLog: withActivity(current, "reflection_analyzed", accepted.id, {
@@ -950,30 +909,35 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       const normalizedCorrection = status === "corrected" ? correction?.trim() ?? "" : null;
       if (status === "corrected" && !normalizedCorrection) return;
       mutate((current) => {
-        const reflection = current.reflections.find((entry) => entry.id === id);
-        if (!reflection?.analysis) return current;
+        const reflection = current.notes.find((entry) => entry.id === id);
+        if (!reflection || !isReflectionDocument(reflection) || !reflection.reflection.analysis) {
+          return current;
+        }
         if (
-          reflection.status === status &&
-          reflection.correction === normalizedCorrection
+          reflection.reflection.status === status &&
+          reflection.reflection.correction === normalizedCorrection
         ) {
           return current;
         }
         const now = new Date().toISOString();
         return {
           ...current,
-          reflections: current.reflections.map((entry) =>
+          notes: current.notes.map((entry) =>
             entry.id === id
               ? {
                   ...entry,
-                  status,
-                  correction: normalizedCorrection,
-                  updatedAt: now,
-                  confirmedAt: status === "ignored" ? null : now
+                  reflection: {
+                    ...reflection.reflection,
+                    status,
+                    correction: normalizedCorrection,
+                    confirmedAt: status === "ignored" ? null : now
+                  },
+                  updatedAt: now
                 }
               : entry
           ),
           activityLog: withActivity(current, `reflection_${status}` as const, id, {
-            responseId: reflection.analysis.responseId,
+            responseId: reflection.reflection.analysis.responseId,
             hasCorrection: status === "corrected"
           })
         };
@@ -986,17 +950,23 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (reflectionId: string, suggestionId: string, text: string) => {
       const now = new Date().toISOString();
       mutate((current) => {
-        const reflection = current.reflections.find((entry) => entry.id === reflectionId);
-        const suggestion = reflection?.suggestions.find((entry) => entry.id === suggestionId);
-        if (!reflection || !suggestion) return current;
+        const reflection = current.notes.find((entry) => entry.id === reflectionId);
+        if (!reflection || !isReflectionDocument(reflection)) return current;
+        const suggestion = reflection.reflection.suggestions.find((entry) => entry.id === suggestionId);
+        if (!suggestion) return current;
         const edited = editReflectionSuggestionValue(suggestion, text, now);
         if (!edited || edited === suggestion) return current;
         return {
           ...current,
-          reflections: current.reflections.map((entry) => entry.id === reflectionId
+          notes: current.notes.map((entry) => entry.id === reflectionId
             ? {
                 ...entry,
-                suggestions: entry.suggestions.map((item) => item.id === suggestionId ? edited : item),
+                reflection: {
+                  ...reflection.reflection,
+                  suggestions: reflection.reflection.suggestions.map((item) =>
+                    item.id === suggestionId ? edited : item
+                  )
+                },
                 updatedAt: now
               }
             : entry
@@ -1019,17 +989,23 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     ) => {
       const now = new Date().toISOString();
       mutate((current) => {
-        const reflection = current.reflections.find((entry) => entry.id === reflectionId);
-        const suggestion = reflection?.suggestions.find((entry) => entry.id === suggestionId);
-        if (!reflection || !suggestion) return current;
+        const reflection = current.notes.find((entry) => entry.id === reflectionId);
+        if (!reflection || !isReflectionDocument(reflection)) return current;
+        const suggestion = reflection.reflection.suggestions.find((entry) => entry.id === suggestionId);
+        if (!suggestion) return current;
         const decided = decideReflectionSuggestionValue(suggestion, status, now);
         if (!decided || decided === suggestion) return current;
         return {
           ...current,
-          reflections: current.reflections.map((entry) => entry.id === reflectionId
+          notes: current.notes.map((entry) => entry.id === reflectionId
             ? {
                 ...entry,
-                suggestions: entry.suggestions.map((item) => item.id === suggestionId ? decided : item),
+                reflection: {
+                  ...reflection.reflection,
+                  suggestions: reflection.reflection.suggestions.map((item) =>
+                    item.id === suggestionId ? decided : item
+                  )
+                },
                 updatedAt: now
               }
             : entry
@@ -1047,74 +1023,64 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const addReflectionSuggestionToNote = useCallback(
     (reflectionId: string, suggestionId: string) => {
-      const reflection = state.reflections.find((entry) => entry.id === reflectionId);
-      const suggestion = reflection?.suggestions.find((entry) => entry.id === suggestionId);
+      const reflection = state.notes.find((entry) => entry.id === reflectionId);
+      const suggestion = reflection && isReflectionDocument(reflection)
+        ? reflection.reflection.suggestions.find((entry) => entry.id === suggestionId)
+        : null;
       if (
         !reflection ||
+        !isReflectionDocument(reflection) ||
         !suggestion ||
         suggestion.status !== "accepted" ||
         (suggestion.kind !== "meaning" && suggestion.kind !== "question")
       ) return null;
       const section = reflectionSuggestionNoteSection(suggestion);
       if (!section) return null;
-      const linked = reflection.noteId
-        ? state.notes.find((note) => note.id === reflection.noteId) ?? null
-        : null;
-      if (suggestion.addedToNoteAt && linked) return linked;
+      if (suggestion.addedToNoteAt) return reflection;
 
       const now = new Date().toISOString();
-      const noteId = linked?.id ?? reflection.noteId ?? availableReflectionNoteId(reflection.id, state.notes);
-      const baseNote = linked ?? createReflectionNote(reflection, noteId);
       const plannedNote: Note = {
-        ...baseNote,
-        body: appendMarkdownSection(baseNote.body, section),
+        ...reflection,
+        body: appendMarkdownSection(reflection.body, section),
+        contentUpdatedAt: now,
+        reflection: {
+          ...reflection.reflection,
+          suggestions: reflection.reflection.suggestions.map((item) =>
+            item.id === suggestionId ? { ...item, addedToNoteAt: now, updatedAt: now } : item
+          )
+        },
         updatedAt: now
       };
 
       mutate((current) => {
-        const currentReflection = current.reflections.find((entry) => entry.id === reflectionId);
-        const currentSuggestion = currentReflection?.suggestions.find((entry) => entry.id === suggestionId);
+        const currentReflection = current.notes.find((entry) => entry.id === reflectionId);
+        if (!currentReflection || !isReflectionDocument(currentReflection)) return current;
+        const currentSuggestion = currentReflection.reflection.suggestions.find(
+          (entry) => entry.id === suggestionId
+        );
         if (
-          !currentReflection ||
           !currentSuggestion ||
           currentSuggestion.status !== "accepted" ||
-          (currentSuggestion.kind !== "meaning" && currentSuggestion.kind !== "question")
+          (currentSuggestion.kind !== "meaning" && currentSuggestion.kind !== "question") ||
+          currentSuggestion.addedToNoteAt
         ) return current;
-        const currentLinked = currentReflection.noteId
-          ? current.notes.find((note) => note.id === currentReflection.noteId) ?? null
-          : null;
-        if (currentSuggestion.addedToNoteAt && currentLinked) return current;
         const currentSection = reflectionSuggestionNoteSection(currentSuggestion);
         if (!currentSection) return current;
-        const currentNoteId = currentLinked?.id ?? currentReflection.noteId ??
-          availableReflectionNoteId(currentReflection.id, current.notes);
-        const currentBaseNote = currentLinked ?? createReflectionNote(currentReflection, currentNoteId);
         const appliedNote: Note = {
-          ...currentBaseNote,
-          body: appendMarkdownSection(currentBaseNote.body, currentSection),
+          ...currentReflection,
+          body: appendMarkdownSection(currentReflection.body, currentSection),
+          contentUpdatedAt: now,
+          reflection: {
+            ...currentReflection.reflection,
+            suggestions: currentReflection.reflection.suggestions.map((item) =>
+              item.id === suggestionId ? { ...item, addedToNoteAt: now, updatedAt: now } : item
+            )
+          },
           updatedAt: now
         };
         return {
           ...current,
-          notes: currentLinked
-            ? current.notes.map((note) => note.id === currentLinked.id ? appliedNote : note)
-            : [appliedNote, ...current.notes],
-          reflections: current.reflections.map((entry) => entry.id === reflectionId
-            ? {
-                ...entry,
-                noteId: currentNoteId,
-                suggestions: entry.suggestions.map((item) => {
-                  if (item.id === suggestionId) {
-                    return { ...item, addedToNoteAt: now, updatedAt: now };
-                  }
-                  return !currentLinked && item.addedToNoteAt
-                    ? { ...item, addedToNoteAt: null, updatedAt: now }
-                    : item;
-                }),
-                updatedAt: now
-              }
-            : entry
-          ),
+          notes: current.notes.map((note) => note.id === reflectionId ? appliedNote : note),
           activityLog: withActivity(current, "reflection_suggestion_note_applied", suggestionId, {
             reflectionId,
             kind: currentSuggestion.kind
@@ -1123,15 +1089,18 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       });
       return plannedNote;
     },
-    [mutate, state.notes, state.reflections]
+    [mutate, state.notes]
   );
 
   const createTaskFromReflectionSuggestion = useCallback(
     (reflectionId: string, suggestionId: string) => {
-      const reflection = state.reflections.find((entry) => entry.id === reflectionId);
-      const suggestion = reflection?.suggestions.find((entry) => entry.id === suggestionId);
+      const reflection = state.notes.find((entry) => entry.id === reflectionId);
+      const suggestion = reflection && isReflectionDocument(reflection)
+        ? reflection.reflection.suggestions.find((entry) => entry.id === suggestionId)
+        : null;
       if (
         !reflection ||
+        !isReflectionDocument(reflection) ||
         !suggestion ||
         suggestion.status !== "accepted" ||
         suggestion.kind !== "next_action"
@@ -1162,10 +1131,12 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       };
 
       mutate((current) => {
-        const currentReflection = current.reflections.find((entry) => entry.id === reflectionId);
-        const currentSuggestion = currentReflection?.suggestions.find((entry) => entry.id === suggestionId);
+        const currentReflection = current.notes.find((entry) => entry.id === reflectionId);
+        if (!currentReflection || !isReflectionDocument(currentReflection)) return current;
+        const currentSuggestion = currentReflection.reflection.suggestions.find(
+          (entry) => entry.id === suggestionId
+        );
         if (
-          !currentReflection ||
           !currentSuggestion ||
           currentSuggestion.status !== "accepted" ||
           currentSuggestion.kind !== "next_action"
@@ -1184,13 +1155,17 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         return {
           ...current,
           tasks: [task, ...current.tasks],
-          reflections: current.reflections.map((entry) => entry.id === reflectionId
+          notes: current.notes.map((entry) => entry.id === reflectionId
             ? {
                 ...entry,
-                suggestions: entry.suggestions.map((item) => item.id === suggestionId
-                  ? { ...item, createdTaskId: task.id, updatedAt: now }
-                  : item
-                ),
+                reflection: {
+                  ...currentReflection.reflection,
+                  suggestions: currentReflection.reflection.suggestions.map((item) =>
+                    item.id === suggestionId
+                      ? { ...item, createdTaskId: task.id, updatedAt: now }
+                      : item
+                  )
+                },
                 updatedAt: now
               }
             : entry
@@ -1202,23 +1177,21 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       });
       return task;
     },
-    [mutate, state.reflections, state.tasks]
+    [mutate, state.notes, state.tasks]
   );
 
   const removeReflection = useCallback(
     (id: string) => {
       mutate((current) => {
-        if (!current.reflections.some((entry) => entry.id === id)) return current;
-        const reflection = current.reflections.find((entry) => entry.id === id)!;
-        const linkedNote = reflection.noteId
-          ? current.notes.find((note) => note.id === reflection.noteId) ?? null
-          : null;
-        const trashed = reflectionTrashEntry(reflection, linkedNote);
+        const reflection = current.notes.find((entry) => entry.id === id);
+        if (!reflection || !isReflectionDocument(reflection)) return current;
+        const now = new Date().toISOString();
+        const trashed = noteTrashEntry(reflection, now);
         return {
           ...current,
-          reflections: current.reflections.filter((entry) => entry.id !== id),
+          notes: current.notes.filter((entry) => entry.id !== id),
           trash: [trashed, ...current.trash],
-          activityLog: withActivity(current, "entity_trashed", id, { kind: "reflection" })
+          activityLog: withActivity(current, "entity_trashed", id, { kind: "note" })
         };
       });
     },
@@ -1228,10 +1201,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   const rememberReflection = useCallback(
     (id: string, text: string) => {
       const normalizedText = text.trim();
-      const reflection = state.reflections.find((entry) => entry.id === id);
-      if (!reflection || !normalizedText) return null;
+      const reflection = state.notes.find((entry) => entry.id === id);
+      if (!reflection || !isReflectionDocument(reflection) || !normalizedText) return null;
       const existing = state.assistantMemory.find(
-        (item) => item.sourceType === "reflection" && item.sourceId === id
+        (item) => item.sourceType === "document" && item.sourceId === id
       );
       const now = new Date().toISOString();
       const memory: AssistantMemoryItem = existing
@@ -1245,7 +1218,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         : {
             id: crypto.randomUUID(),
             text: normalizedText,
-            sourceType: "reflection",
+            sourceType: "document",
             sourceId: id,
             sourceUpdatedAt: reflection.updatedAt,
             status: "active",
@@ -1254,10 +1227,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
           };
 
       mutate((current) => {
-        const currentReflection = current.reflections.find((entry) => entry.id === id);
-        if (!currentReflection) return current;
+        const currentReflection = current.notes.find((entry) => entry.id === id);
+        if (!currentReflection || !isReflectionDocument(currentReflection)) return current;
         const currentExisting = current.assistantMemory.find(
-          (item) => item.sourceType === "reflection" && item.sourceId === id
+          (item) => item.sourceType === "document" && item.sourceId === id
         );
         const nextMemory = {
           ...memory,
@@ -1274,13 +1247,13 @@ export function DashboardProvider({ children }: PropsWithChildren) {
             current,
             currentExisting ? "memory_updated" : "memory_created",
             nextMemory.id,
-            { source: "reflection" }
+            { source: "document" }
           )
         };
       });
       return memory;
     },
-    [mutate, state.assistantMemory, state.reflections]
+    [mutate, state.assistantMemory, state.notes]
   );
 
   const addAssistantMemory = useCallback(
@@ -1789,17 +1762,6 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         } else if (snapshot.kind === "note") {
           if (current.notes.some((note) => note.id === snapshot.note.id)) return current;
           next = { ...current, notes: [snapshot.note, ...current.notes] };
-        } else if (snapshot.kind === "reflection") {
-          if (current.reflections.some((reflection) => reflection.id === snapshot.reflection.id)) return current;
-          const shouldRestoreNote = snapshot.linkedNote &&
-            !current.notes.some((note) => note.id === snapshot.linkedNote?.id);
-          next = {
-            ...current,
-            reflections: [snapshot.reflection, ...current.reflections],
-            notes: shouldRestoreNote && snapshot.linkedNote
-              ? [snapshot.linkedNote, ...current.notes]
-              : current.notes
-          };
         } else if (snapshot.kind === "event") {
           if (current.events.some((event) => event.id === snapshot.event.id)) return current;
           next = { ...current, events: [snapshot.event, ...current.events] };

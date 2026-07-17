@@ -29,6 +29,7 @@ import {
   selectLocalFolder,
   testObsidianVault
 } from "../lib/integrationApi";
+import { reflectionDocuments } from "../domain/reflections/reflectionNote";
 import { useDashboard } from "../state/DashboardContext";
 import type { CodexCommand, IntegrationStatus } from "../types";
 
@@ -94,9 +95,8 @@ export function IntegrationsView() {
   const obsidian = state.integrations.obsidian;
   const codex = state.integrations.codex;
   const snapshotScope = codex.snapshotScope;
-  const reflectionNoteIds = new Set(
-    state.reflections.map((entry) => entry.noteId).filter((id): id is string => Boolean(id))
-  );
+  const reflectionEntries = reflectionDocuments(state.notes);
+  const reflectionNoteIds = new Set(reflectionEntries.map((entry) => entry.id));
   const shareableNotesCount = state.notes.filter((note) =>
     note.origin !== "reflection" &&
     !reflectionNoteIds.has(note.id) &&
@@ -163,7 +163,7 @@ export function IntegrationsView() {
     snapshotScope.projects ? `${state.projects.length} проектов` : "",
     snapshotScope.calendar ? `${state.events.length} событий` : "",
     snapshotScope.notes ? `${shareableNotesCount} заметок` : "",
-    snapshotScope.journal ? `${state.reflections.length} записей дневника` : "",
+    snapshotScope.journal ? `${reflectionEntries.length} документов осмысления` : "",
     snapshotScope.reading ? `${state.readingItems.length} материалов` : ""
   ].filter(Boolean).join(" · ") || "ничего не выбрано";
 
