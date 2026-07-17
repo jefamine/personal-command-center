@@ -16,6 +16,7 @@ import type {
   Task
 } from "../types";
 import {
+  installLifeAreaTemplates,
   normalizeLifeModel,
   type LegacyProjectWithOptionalAreaId
 } from "../domain/life/lifeAreas";
@@ -30,11 +31,13 @@ import { createReflectionNote } from "../domain/reflections/reflectionNote";
 import { normalizeReflectionMemoryReferences } from "../domain/reflections/reflectionMemory";
 import { normalizeReflectionSuggestions } from "../domain/reflections/reflectionSuggestions";
 import { normalizeWidgetLayout } from "./widgetLayout";
+import { createEmptyObjectGraph, normalizeObjectGraph } from "../domain/objects/objectGraph";
 
 const DB_NAME = "personal-command-center";
 const DB_VERSION = 1;
 const STORE_NAME = "app";
 const STATE_KEY = "dashboard-state";
+const PRE_V13_SAFETY_KEY = "dashboard-state-before-v13";
 
 type LegacyTask = Omit<Task, "recurrence" | "generatedFromTaskId"> &
   Partial<Pick<Task, "recurrence" | "generatedFromTaskId">>;
@@ -48,12 +51,13 @@ type AppearanceSettingKey =
   | "density"
   | "cornerStyle"
   | "fontScale"
-  | "sidebarCollapsed";
+  | "sidebarCollapsed"
+  | "lifeAreaTemplatesVersion";
 type LegacyAppSettings = Omit<AppSettings, AppearanceSettingKey> &
   Partial<Pick<AppSettings, AppearanceSettingKey>>;
 
 interface LegacyDashboardState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
   tasks: LegacyTask[];
   projects: LegacyProjectWithOptionalAreaId[];
   lifeAreas?: unknown;
@@ -395,8 +399,56 @@ function normalizeWidgets(
 }
 
 export function migrateState(candidate: DashboardState | LegacyDashboardState): DashboardState {
+  const runtimeVersion = (candidate as { version?: unknown }).version;
+  if (!Number.isInteger(runtimeVersion) || Number(runtimeVersion) < 1 || Number(runtimeVersion) > 13) {
+    throw new Error(`Неподдерживаемая версия локальных данных: ${String(runtimeVersion)}.`);
+  }
+  if (
+    runtimeVersion === 13 &&
+    (!isRecord(candidate) || !hasValidV13CanonicalData(candidate))
+  ) {
+    throw new Error("Локальные данные v13 повреждены: автосохранение остановлено.");
+  }
   const lifeModel = normalizeLifeModel(candidate.projects, candidate.lifeAreas);
+  const installedTemplateVersion = Number.isInteger(candidate.settings.lifeAreaTemplatesVersion)
+    ? Number(candidate.settings.lifeAreaTemplatesVersion)
+    : 0;
+  const lifeAreas = installedTemplateVersion < 1
+    ? installLifeAreaTemplates(lifeModel.lifeAreas, candidate.updatedAt)
+    : lifeModel.lifeAreas;
+  const settings: AppSettings = {
+    ...createDefaultSettings(),
+    ...candidate.settings,
+    // Stage 13 temporarily ignored this value. Start the restored navigation in its compact mode once.
+    sidebarCollapsed: installedTemplateVersion < 1 ? true : candidate.settings.sidebarCollapsed ?? true,
+    lifeAreaTemplatesVersion: 1
+  };
 
+  if (candidate.version === 13) {
+    const reflections = (candidate.reflections ?? [])
+      .map((entry) => normalizeReflection(entry, true, true))
+      .filter((entry): entry is ReflectionEntry => entry !== null);
+    const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
+    return {
+      ...candidate,
+      version: 13,
+      tasks: candidate.tasks.map((task) => ({
+        ...task,
+        recurrence: task.recurrence ?? "none",
+        generatedFromTaskId: task.generatedFromTaskId ?? null
+      })),
+      settings,
+      integrations: mergeIntegrations(candidate.integrations),
+      widgets: normalizeWidgets(candidate.widgets, false),
+      projects: lifeModel.projects,
+      lifeAreas,
+      notes: reflectionNotes.notes,
+      reflections: reflectionNotes.reflections,
+      assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
+      personalContext: normalizePersonalContext(candidate.personalContext),
+      objectGraph: normalizeObjectGraph(candidate.objectGraph)
+    };
+  }
   if (candidate.version === 12) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, true))
@@ -404,21 +456,25 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 12,
+      version: 13,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
         generatedFromTaskId: task.generatedFromTaskId ?? null
       })),
-      settings: { ...createDefaultSettings(), ...candidate.settings },
+      settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
       projects: lifeModel.projects,
-      lifeAreas: lifeModel.lifeAreas,
+      lifeAreas,
+      events: candidate.events ?? [],
       notes: reflectionNotes.notes,
       reflections: reflectionNotes.reflections,
       assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
-      personalContext: normalizePersonalContext(candidate.personalContext)
+      personalContext: normalizePersonalContext(candidate.personalContext),
+      readingItems: candidate.readingItems ?? [],
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: createEmptyObjectGraph()
     };
   }
   if (candidate.version === 11) {
@@ -428,16 +484,16 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 12,
+      version: 13,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
         generatedFromTaskId: task.generatedFromTaskId ?? null
       })),
       projects: lifeModel.projects,
-      lifeAreas: lifeModel.lifeAreas,
+      lifeAreas,
       events: candidate.events ?? [],
-      settings: { ...createDefaultSettings(), ...candidate.settings },
+      settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
       notes: reflectionNotes.notes,
@@ -445,7 +501,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
-      activityLog: candidate.activityLog ?? []
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: createEmptyObjectGraph()
     };
   }
   if (candidate.version === 10) {
@@ -455,7 +512,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 12,
+      version: 13,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -463,8 +520,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       })),
       events: candidate.events ?? [],
       projects: lifeModel.projects,
-      lifeAreas: lifeModel.lifeAreas,
-      settings: { ...createDefaultSettings(), ...candidate.settings },
+      lifeAreas,
+      settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
       notes: reflectionNotes.notes,
@@ -472,7 +529,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
-      activityLog: candidate.activityLog ?? []
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: createEmptyObjectGraph()
     };
   }
   if (candidate.version === 9) {
@@ -482,7 +540,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 12,
+      version: 13,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -490,8 +548,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       })),
       events: candidate.events ?? [],
       projects: lifeModel.projects,
-      lifeAreas: lifeModel.lifeAreas,
-      settings: { ...createDefaultSettings(), ...candidate.settings },
+      lifeAreas,
+      settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
       notes: reflectionNotes.notes,
@@ -499,7 +557,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
-      activityLog: candidate.activityLog ?? []
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: createEmptyObjectGraph()
     };
   }
   if (candidate.version === 8) {
@@ -509,7 +568,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 12,
+      version: 13,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -517,8 +576,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       })),
       events: candidate.events ?? [],
       projects: lifeModel.projects,
-      lifeAreas: lifeModel.lifeAreas,
-      settings: { ...createDefaultSettings(), ...candidate.settings },
+      lifeAreas,
+      settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
       notes: reflectionNotes.notes,
@@ -526,7 +585,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       assistantMemory: [],
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
-      activityLog: candidate.activityLog ?? []
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: createEmptyObjectGraph()
     };
   }
   if (candidate.version === 7) {
@@ -536,7 +596,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 12,
+      version: 13,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -544,21 +604,22 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       })),
       events: candidate.events ?? [],
       projects: lifeModel.projects,
-      lifeAreas: lifeModel.lifeAreas,
+      lifeAreas,
       notes: reflectionNotes.notes,
-      settings: { ...createDefaultSettings(), ...candidate.settings },
+      settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
       reflections: reflectionNotes.reflections,
       assistantMemory: [],
       personalContext: createDefaultPersonalContext(),
       readingItems: candidate.readingItems ?? [],
-      activityLog: candidate.activityLog ?? []
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: createEmptyObjectGraph()
     };
   }
   return {
     ...candidate,
-    version: 12,
+    version: 13,
     tasks: candidate.tasks.map((task) => ({
       ...task,
       recurrence: task.recurrence ?? "none",
@@ -566,16 +627,17 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     })),
     events: candidate.events ?? [],
     projects: lifeModel.projects,
-    lifeAreas: lifeModel.lifeAreas,
+    lifeAreas,
     notes: candidate.notes ?? [],
     reflections: [],
     assistantMemory: [],
     personalContext: createDefaultPersonalContext(),
-    settings: { ...createDefaultSettings(), ...candidate.settings },
+    settings,
     integrations: mergeIntegrations(candidate.integrations),
     widgets: normalizeWidgets(candidate.widgets, true),
     readingItems: candidate.readingItems ?? [],
     activityLog: candidate.activityLog ?? [],
+    objectGraph: createEmptyObjectGraph(),
     updatedAt: new Date().toISOString()
   };
 }
@@ -597,14 +659,41 @@ function openDatabase(): Promise<IDBDatabase> {
 export async function loadState(): Promise<DashboardState | null> {
   const database = await openDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = database.transaction(STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORE_NAME).get(STATE_KEY);
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(STATE_KEY);
+    let loaded: DashboardState | null = null;
+    let failure: unknown = null;
     request.onsuccess = () => {
       const result = request.result as DashboardState | LegacyDashboardState | undefined;
-      resolve(result ? migrateState(result) : null);
+      try {
+        loaded = result ? migrateState(result) : null;
+      } catch (error) {
+        failure = error;
+        transaction.abort();
+        return;
+      }
+      const version = result ? Number((result as { version?: unknown }).version) : null;
+      if (result && version !== null && version <= 12) {
+        const safetyRequest = store.get(PRE_V13_SAFETY_KEY);
+        safetyRequest.onsuccess = () => {
+          if (safetyRequest.result === undefined) store.put(result, PRE_V13_SAFETY_KEY);
+        };
+      }
     };
-    request.onerror = () => reject(request.error);
-    transaction.oncomplete = () => database.close();
+    request.onerror = () => { failure = request.error; };
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(loaded);
+    };
+    transaction.onerror = () => {
+      database.close();
+      reject(failure ?? transaction.error ?? new Error("Не удалось прочитать локальное хранилище."));
+    };
+    transaction.onabort = () => {
+      database.close();
+      reject(failure ?? transaction.error ?? new Error("Чтение локального хранилища отменено."));
+    };
   });
 }
 
@@ -617,7 +706,14 @@ export async function saveState(state: DashboardState): Promise<void> {
       database.close();
       resolve();
     };
-    transaction.onerror = () => reject(transaction.error);
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error);
+    };
+    transaction.onabort = () => {
+      database.close();
+      reject(transaction.error ?? new Error("Сохранение локального состояния отменено."));
+    };
   });
 }
 
@@ -672,6 +768,377 @@ export function downloadMarkdownExport(state: DashboardState): void {
   URL.revokeObjectURL(url);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNullableDateString(value: unknown): boolean {
+  return value === null || isValidDateString(value);
+}
+
+function isNullableNonEmptyString(value: unknown): boolean {
+  return value === null || isNonEmptyString(value);
+}
+
+function isFiniteInteger(value: unknown, minimum = Number.MIN_SAFE_INTEGER): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= minimum;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function hasUniqueEntityIds(value: unknown[], predicate: (entry: unknown) => boolean): boolean {
+  const ids = new Set<string>();
+  return value.every((entry) => {
+    if (!predicate(entry) || !isRecord(entry) || !isNonEmptyString(entry.id) || ids.has(entry.id)) {
+      return false;
+    }
+    ids.add(entry.id);
+    return true;
+  });
+}
+
+const taskStatuses = ["inbox", "next", "planned", "waiting", "someday", "done"];
+const energyLevels = ["low", "medium", "high"];
+const recurrenceRules = ["none", "daily", "weekdays", "weekly", "monthly"];
+const projectStatuses = ["active", "paused", "completed"];
+const eventKinds = ["meeting", "focus", "personal", "break"];
+const eventSources = ["local", "dashboard", "google"];
+
+function isValidTask(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    typeof value.notes === "string" &&
+    taskStatuses.includes(String(value.status)) &&
+    isNullableNonEmptyString(value.projectId) &&
+    isFiniteInteger(value.priority, 1) && Number(value.priority) <= 4 &&
+    isFiniteInteger(value.estimateMinutes, 0) && Number(value.estimateMinutes) <= 24 * 60 &&
+    energyLevels.includes(String(value.energy)) &&
+    typeof value.context === "string" &&
+    isNullableDateString(value.dueDate) &&
+    isNullableDateString(value.scheduledDate) &&
+    isNullableDateString(value.completedAt) &&
+    recurrenceRules.includes(String(value.recurrence)) &&
+    isNullableNonEmptyString(value.generatedFromTaskId) &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt) &&
+    (value.status === "done" ? isValidDateString(value.completedAt) : value.completedAt === null);
+}
+
+function isValidProject(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    typeof value.description === "string" &&
+    isNullableNonEmptyString(value.areaId) &&
+    typeof value.area === "string" &&
+    isNonEmptyString(value.color) &&
+    projectStatuses.includes(String(value.status)) &&
+    isNullableDateString(value.nextReviewAt) &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt);
+}
+
+function isValidLifeArea(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    typeof value.description === "string" &&
+    isNonEmptyString(value.color) &&
+    typeof value.archived === "boolean" &&
+    (value.showInTopNavigation === undefined || typeof value.showInTopNavigation === "boolean") &&
+    isFiniteInteger(value.order, 0) &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt);
+}
+
+function isValidCalendarEvent(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    isValidDateString(value.startAt) &&
+    isValidDateString(value.endAt) &&
+    Date.parse(value.endAt) >= Date.parse(value.startAt) &&
+    eventKinds.includes(String(value.kind)) &&
+    eventSources.includes(String(value.source)) &&
+    isNullableNonEmptyString(value.taskId) &&
+    typeof value.notes === "string" &&
+    typeof value.locked === "boolean" &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt);
+}
+
+function isValidNote(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    typeof value.body === "string" &&
+    isNullableNonEmptyString(value.projectId) &&
+    isStringArray(value.tags) &&
+    typeof value.pinned === "boolean" &&
+    (value.origin === undefined || value.origin === "reflection") &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt);
+}
+
+function isValidReflectionAnalysis(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.responseId) &&
+    isNonEmptyString(value.requestId) &&
+    typeof value.understanding === "string" &&
+    isStringArray(value.observations) &&
+    typeof value.possibleExplanation === "string" &&
+    isStringArray(value.alternatives) &&
+    typeof value.question === "string" &&
+    typeof value.proposedAction === "string" &&
+    value.source === "codex" &&
+    isValidDateString(value.generatedAt);
+}
+
+function isValidReflection(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const status = value.status as ReflectionStatus;
+  const analysis = value.analysis === null ? null : value.analysis;
+  const memoryReferences = normalizeReflectionMemoryReferences(value.analysisMemoryRefs);
+  const suggestions = analysis && isRecord(analysis) && isNonEmptyString(analysis.responseId)
+    ? normalizeReflectionSuggestions(value.suggestions, analysis.responseId)
+    : Array.isArray(value.suggestions) && value.suggestions.length === 0 ? [] : null;
+  const contextSections = value.analysisContextSections;
+  const hasValidContextSections = Array.isArray(contextSections) &&
+    contextSections.every((section) => personalContextSections.includes(section as PersonalContextSectionId)) &&
+    new Set(contextSections).size === contextSections.length;
+  const requiresAnalysis = ["analyzed", "confirmed", "corrected"].includes(status);
+
+  return isNonEmptyString(value.id) &&
+    isNullableNonEmptyString(value.noteId) &&
+    typeof value.originalText === "string" &&
+    reflectionStatuses.includes(status) &&
+    (analysis === null || isValidReflectionAnalysis(analysis)) &&
+    (!requiresAnalysis || analysis !== null) &&
+    (status !== "corrected" || (typeof value.correction === "string" && Boolean(value.correction.trim()))) &&
+    (value.correction === null || typeof value.correction === "string") &&
+    isNullableNonEmptyString(value.analysisRequestId) &&
+    isNullableNonEmptyString(value.analysisRequestDigest) &&
+    isNullableDateString(value.analysisRequestedAt) &&
+    isNullableDateString(value.analysisSourceUpdatedAt) &&
+    hasValidContextSections &&
+    isNullableDateString(value.analysisProfileUpdatedAt) &&
+    memoryReferences !== null &&
+    suggestions !== null &&
+    (status !== "queued" || (
+      isNonEmptyString(value.analysisRequestId) &&
+      isNonEmptyString(value.analysisRequestDigest) &&
+      isValidDateString(value.analysisSourceUpdatedAt)
+    )) &&
+    ((status !== "captured" && status !== "queued" && analysis !== null) ||
+      (Array.isArray(value.suggestions) && value.suggestions.length === 0)) &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt) &&
+    isNullableDateString(value.confirmedAt);
+}
+
+function isValidAssistantMemoryItem(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const reflectionSource = value.sourceType === "reflection";
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.text) &&
+    assistantMemorySourceTypes.includes(value.sourceType as AssistantMemoryItem["sourceType"]) &&
+    assistantMemoryStatuses.includes(value.status as AssistantMemoryItem["status"]) &&
+    (reflectionSource ? isNonEmptyString(value.sourceId) : value.sourceId === null) &&
+    (reflectionSource ? isValidDateString(value.sourceUpdatedAt) : value.sourceUpdatedAt === null) &&
+    isValidDateString(value.createdAt) &&
+    isValidDateString(value.updatedAt);
+}
+
+const svpModes = ["off", "plain", "systemic"];
+const svpVectors = ["skin", "anal", "muscular", "urethral", "visual", "sound", "oral", "olfactory"];
+
+function isValidPersonalContext(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.systemProfile)) return false;
+  const vectors = value.systemProfile.selfDeclaredVectors;
+  return typeof value.goals === "string" &&
+    typeof value.rhythms === "string" &&
+    typeof value.preferences === "string" &&
+    typeof value.boundaries === "string" &&
+    svpModes.includes(String(value.systemProfile.mode)) &&
+    Array.isArray(vectors) &&
+    vectors.every((vector) => svpVectors.includes(String(vector))) &&
+    new Set(vectors).size === vectors.length &&
+    typeof value.systemProfile.manifestations === "string" &&
+    typeof value.systemProfile.combinationNotes === "string" &&
+    isNullableDateString(value.updatedAt);
+}
+
+function isValidAppSettings(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const time = (entry: unknown) => typeof entry === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(entry);
+  return typeof value.userName === "string" &&
+    time(value.workdayStart) && time(value.workdayEnd) &&
+    isFiniteInteger(value.dailyCapacityMinutes, 0) && Number(value.dailyCapacityMinutes) <= 24 * 60 &&
+    isFiniteInteger(value.focusBlockMinutes, 1) && Number(value.focusBlockMinutes) <= 24 * 60 &&
+    isFiniteInteger(value.bufferMinutes, 0) && Number(value.bufferMinutes) <= 24 * 60 &&
+    energyLevels.includes(String(value.currentEnergy)) &&
+    ["light", "dark", "system"].includes(String(value.theme)) &&
+    ["lime", "violet", "ocean", "coral", "rose", "custom"].includes(String(value.accentPreset)) &&
+    isNonEmptyString(value.accentColor) &&
+    isNonEmptyString(value.secondaryColor) &&
+    ["warm", "cool", "neutral"].includes(String(value.surfaceTone)) &&
+    ["soft", "glass", "contrast"].includes(String(value.visualStyle)) &&
+    ["comfortable", "compact"].includes(String(value.density)) &&
+    ["rounded", "balanced", "crisp"].includes(String(value.cornerStyle)) &&
+    ["normal", "large", "xlarge"].includes(String(value.fontScale)) &&
+    typeof value.sidebarCollapsed === "boolean" &&
+    (value.lifeAreaTemplatesVersion === undefined || isFiniteInteger(value.lifeAreaTemplatesVersion, 0));
+}
+
+function isValidIntegrations(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.google) || !isRecord(value.obsidian) || !isRecord(value.codex)) {
+    return false;
+  }
+  const google = value.google;
+  const obsidian = value.obsidian;
+  const codex = value.codex;
+  const scope = codex.snapshotScope;
+  const integrationStatuses = ["disconnected", "configured", "connected", "error"];
+  const validScope = isRecord(scope) && ["tasks", "projects", "calendar", "notes", "journal", "reading"]
+    .every((key) => typeof scope[key] === "boolean");
+  return typeof google.enabled === "boolean" &&
+    integrationStatuses.includes(String(google.status)) &&
+    typeof google.calendarEnabled === "boolean" &&
+    typeof google.tasksEnabled === "boolean" &&
+    isFiniteInteger(google.syncIntervalMinutes, 1) &&
+    typeof google.readAllCalendars === "boolean" &&
+    typeof google.focusCalendarName === "string" &&
+    typeof google.writeFocusBlocks === "boolean" &&
+    typeof google.tasksListName === "string" &&
+    ["inbox", "two-way"].includes(String(google.tasksMode)) &&
+    ["latest", "dashboard"].includes(String(google.conflictPolicy)) &&
+    isNullableDateString(google.lastSyncAt) &&
+    typeof obsidian.enabled === "boolean" &&
+    typeof obsidian.vaultPath === "string" &&
+    typeof obsidian.folder === "string" &&
+    typeof obsidian.includeFrontmatter === "boolean" &&
+    ["manual", "mirror"].includes(String(obsidian.mode)) &&
+    isNullableDateString(obsidian.lastExportAt) &&
+    typeof codex.enabled === "boolean" &&
+    ["confirm", "trusted"].includes(String(codex.permissionMode)) &&
+    typeof codex.allowCreateTasks === "boolean" &&
+    typeof codex.allowUpdateTasks === "boolean" &&
+    typeof codex.allowCompleteTasks === "boolean" &&
+    typeof codex.allowNotes === "boolean" &&
+    typeof codex.allowReading === "boolean" &&
+    validScope &&
+    isNullableDateString(codex.lastSnapshotAt) &&
+    isNullableDateString(codex.lastCommandImportAt);
+}
+
+const widgetTypes = ["overview", "focus", "reflection", "plan", "inbox", "weather", "recommendations", "reading", "custom"];
+const widgetSizes = ["full", "two-thirds", "half", "third"];
+const widgetVariants = ["note", "link", "image", "metric", "file", "api"];
+const widgetConfigStringKeys = new Set([
+  "city", "description", "body", "linkUrl", "linkLabel", "imageUrl", "imageAlt",
+  "metricValue", "metricUnit", "fileUrl", "fileName", "apiUrl", "apiPath"
+]);
+
+function isValidWidgetConfig(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([key, entry]) => {
+    if (widgetConfigStringKeys.has(key)) return typeof entry === "string";
+    if (key === "latitude" || key === "longitude") return typeof entry === "number" && Number.isFinite(entry);
+    if (key === "variant") return widgetVariants.includes(String(entry));
+    return false;
+  });
+}
+
+function isValidWidget(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    widgetTypes.includes(String(value.type)) &&
+    typeof value.title === "string" &&
+    typeof value.enabled === "boolean" &&
+    widgetSizes.includes(String(value.size)) &&
+    (value.gridWidth === undefined || (isFiniteInteger(value.gridWidth, 1) && Number(value.gridWidth) <= 12)) &&
+    (value.gridHeight === undefined || (isFiniteInteger(value.gridHeight, 1) && Number(value.gridHeight) <= 14)) &&
+    isFiniteInteger(value.order, 0) &&
+    isValidWidgetConfig(value.config);
+}
+
+function isValidReadingItem(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    typeof value.summary === "string" &&
+    typeof value.body === "string" &&
+    typeof value.url === "string" &&
+    typeof value.source === "string" &&
+    isStringArray(value.tags) &&
+    isValidDateString(value.createdAt);
+}
+
+const activityTypes = [
+  "task_created", "task_completed", "task_reopened", "plan_confirmed", "note_created",
+  "reflection_created", "reflection_queued", "reflection_queue_cancelled", "reflection_analyzed",
+  "reflection_confirmed", "reflection_corrected", "reflection_ignored", "reflection_note_created",
+  "reflection_suggestion_edited", "reflection_suggestion_decided", "reflection_suggestion_note_applied",
+  "reflection_suggestion_task_created", "memory_created", "memory_updated", "memory_paused",
+  "memory_resumed", "memory_removed", "life_area_created", "life_area_updated", "life_area_removed",
+  "project_area_changed", "object_created", "object_updated", "object_relation_added", "object_relation_removed"
+];
+
+function isValidActivityEntry(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.metadata)) return false;
+  const validMetadata = Object.values(value.metadata).every((entry) =>
+    entry === null || typeof entry === "string" || typeof entry === "boolean" ||
+    (typeof entry === "number" && Number.isFinite(entry))
+  );
+  return isNonEmptyString(value.id) &&
+    activityTypes.includes(String(value.type)) &&
+    (value.entityId === null || typeof value.entityId === "string") &&
+    isValidDateString(value.timestamp) &&
+    validMetadata;
+}
+
+function hasValidV13CanonicalData(candidate: Record<string, unknown>): boolean {
+  if (
+    candidate.version !== 13 ||
+    !Array.isArray(candidate.tasks) || !hasUniqueEntityIds(candidate.tasks, isValidTask) ||
+    !Array.isArray(candidate.projects) || !hasUniqueEntityIds(candidate.projects, isValidProject) ||
+    !Array.isArray(candidate.lifeAreas) || !hasUniqueEntityIds(candidate.lifeAreas, isValidLifeArea) ||
+    !Array.isArray(candidate.events) || !hasUniqueEntityIds(candidate.events, isValidCalendarEvent) ||
+    !Array.isArray(candidate.notes) || !hasUniqueEntityIds(candidate.notes, isValidNote) ||
+    !Array.isArray(candidate.reflections) || !hasUniqueEntityIds(candidate.reflections, isValidReflection) ||
+    !Array.isArray(candidate.assistantMemory) || !hasUniqueEntityIds(candidate.assistantMemory, isValidAssistantMemoryItem) ||
+    !isValidPersonalContext(candidate.personalContext) ||
+    !isValidAppSettings(candidate.settings) ||
+    !isValidIntegrations(candidate.integrations) ||
+    !Array.isArray(candidate.widgets) || !hasUniqueEntityIds(candidate.widgets, isValidWidget) ||
+    !Array.isArray(candidate.readingItems) || !hasUniqueEntityIds(candidate.readingItems, isValidReadingItem) ||
+    !Array.isArray(candidate.activityLog) || !hasUniqueEntityIds(candidate.activityLog, isValidActivityEntry) ||
+    !isValidDateString(candidate.updatedAt)
+  ) return false;
+
+  const areaIds = new Set(candidate.lifeAreas.map((area) => (area as { id: string }).id));
+  if (candidate.projects.some((project) => {
+    const areaId = (project as { areaId: string | null }).areaId;
+    return areaId !== null && !areaIds.has(areaId);
+  })) return false;
+
+  return true;
+}
+
+function isValidV13Backup(candidate: Record<string, unknown>): boolean {
+  if (!hasValidV13CanonicalData(candidate)) return false;
+
+  try {
+    normalizeObjectGraph(candidate.objectGraph);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 function reflectionsHaveSuggestionArrays(value: unknown): boolean {
   return Array.isArray(value) && value.every(
     (entry) => Boolean(entry) && typeof entry === "object" && Array.isArray(
@@ -697,6 +1164,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
     reflections?: unknown;
     assistantMemory?: unknown;
     personalContext?: unknown;
+    objectGraph?: unknown;
+    updatedAt?: unknown;
   };
   if (
     (candidate.version !== 1 &&
@@ -710,7 +1179,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
       candidate.version !== 9 &&
       candidate.version !== 10 &&
       candidate.version !== 11 &&
-      candidate.version !== 12) ||
+      candidate.version !== 12 &&
+      candidate.version !== 13) ||
     !Array.isArray(candidate.tasks) ||
     !Array.isArray(candidate.projects) ||
     (candidate.version >= 2 && !Array.isArray(candidate.events)) ||
@@ -725,8 +1195,10 @@ export async function readBackup(file: File): Promise<DashboardState> {
     (candidate.version >= 8 && !candidate.personalContext) ||
     (candidate.version >= 9 && !Array.isArray(candidate.assistantMemory)) ||
     (candidate.version >= 11 && !reflectionsHaveSuggestionArrays(candidate.reflections)) ||
-    (candidate.version === 12 && !Array.isArray(candidate.lifeAreas)) ||
-    !candidate.settings
+    (candidate.version >= 12 && !Array.isArray(candidate.lifeAreas)) ||
+    (candidate.version === 13 && !candidate.objectGraph) ||
+    !candidate.settings ||
+    (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>))
   ) {
     throw new Error("Файл не похож на резервную копию командного центра.");
   }

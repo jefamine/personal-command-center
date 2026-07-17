@@ -5,6 +5,39 @@ export const UNASSIGNED_LIFE_AREA = "Без сферы";
 const FALLBACK_DATE = "1970-01-01T00:00:00.000Z";
 const areaPalette = ["#7c5cff", "#2f80ed", "#2eb67d", "#e28a38", "#d96aa7", "#7a8b3a"];
 
+export const LIFE_AREA_TEMPLATES = [
+  {
+    id: "life-area-template-family",
+    title: "Семья",
+    description: "Близкие, общая жизнь, отношения, воспоминания и то, что хочется создавать вместе.",
+    color: "#d96aa7"
+  },
+  {
+    id: "life-area-template-work",
+    title: "Работа",
+    description: "То, чем вы зарабатываете на жизнь: обязательства, проекты, материалы и профессиональное развитие.",
+    color: "#2f80ed"
+  },
+  {
+    id: "life-area-template-self-knowledge",
+    title: "Познание себя",
+    description: "Наблюдения, осмысление, реализация, важные вопросы и материалы о человеке.",
+    color: "#7c5cff"
+  },
+  {
+    id: "life-area-template-health",
+    title: "Здоровье",
+    description: "Самочувствие, медицинские данные, движение, питание и бережная забота о себе.",
+    color: "#2eb67d"
+  },
+  {
+    id: "life-area-template-leisure",
+    title: "Досуг",
+    description: "Отдых, впечатления, игры, поездки, творчество и всё, что наполняет жизнь.",
+    color: "#e28a38"
+  }
+] as const;
+
 export type LegacyProjectWithOptionalAreaId = Omit<Project, "areaId"> & {
   areaId?: string | null;
 };
@@ -58,6 +91,35 @@ function deterministicAreaId(title: string, occupied: Set<string>): string {
   return `${base}-${suffix}`;
 }
 
+export function createLifeAreaTemplates(now: string, startOrder = 0): LifeArea[] {
+  return LIFE_AREA_TEMPLATES.map((template, index) => ({
+    ...template,
+    archived: false,
+    showInTopNavigation: true,
+    order: startOrder + index,
+    createdAt: now,
+    updatedAt: now
+  }));
+}
+
+/**
+ * Installs the agreed starter map once for an untouched prototype state.
+ * A custom set is never expanded automatically.
+ */
+export function installLifeAreaTemplates(lifeAreas: LifeArea[], now: string): LifeArea[] {
+  const activeTitles = lifeAreas.filter((area) => !area.archived).map((area) => lifeAreaTitleKey(area.title));
+  const untouchedPrototype = activeTitles.length === 0 || (
+    activeTitles.length === 1 && activeTitles[0] === lifeAreaTitleKey("Личная эффективность")
+  );
+  if (!untouchedPrototype) return lifeAreas;
+
+  const ids = new Set(lifeAreas.map((area) => area.id));
+  const titles = new Set(lifeAreas.map((area) => lifeAreaTitleKey(area.title)));
+  const templates = createLifeAreaTemplates(now, lifeAreas.length)
+    .filter((area) => !ids.has(area.id) && !titles.has(lifeAreaTitleKey(area.title)));
+  return [...lifeAreas, ...templates].map((area, order) => ({ ...area, order }));
+}
+
 function normalizeExistingLifeAreas(value: unknown): LifeArea[] {
   if (!Array.isArray(value)) return [];
   const seenIds = new Set<string>();
@@ -80,6 +142,7 @@ function normalizeExistingLifeAreas(value: unknown): LifeArea[] {
       description: typeof candidate.description === "string" ? candidate.description : "",
       color: validColor(candidate.color) ? candidate.color : areaPalette[result.length % areaPalette.length],
       archived: candidate.archived === true,
+      showInTopNavigation: candidate.showInTopNavigation !== false,
       order: Number.isInteger(candidate.order) && Number(candidate.order) >= 0
         ? Number(candidate.order)
         : result.length,
@@ -120,6 +183,7 @@ export function normalizeLifeModel(
           description: "",
           color: validColor(project.color) ? project.color : areaPalette[lifeAreas.length % areaPalette.length],
           archived: false,
+          showInTopNavigation: true,
           order: lifeAreas.length,
           createdAt,
           updatedAt
@@ -151,4 +215,3 @@ export function projectLifeArea(project: Project, lifeAreas: LifeArea[]): LifeAr
 export function projectLifeAreaTitle(project: Project, lifeAreas: LifeArea[]): string {
   return projectLifeArea(project, lifeAreas)?.title ?? UNASSIGNED_LIFE_AREA;
 }
-

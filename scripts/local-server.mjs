@@ -13,6 +13,7 @@ import {
 import { createServer } from "node:http";
 import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isCodexCommand, validateCodexSnapshot } from "./bridge-contract.mjs";
 
 const host = "127.0.0.1";
 const port = 4173;
@@ -45,9 +46,18 @@ const mimeTypes = {
 
 function sendFile(response, filePath) {
   const extension = extname(filePath);
+  const fileName = basename(filePath);
+  const hashedAsset = filePath.includes(`${sep}assets${sep}`) && /-[a-z0-9_-]{6,}\.[a-z0-9]+$/i.test(fileName);
+  const cacheControl = fileName === "sw.js"
+    ? "no-cache"
+    : fileName === "index.html" || fileName === "registerSW.js" || extension === ".webmanifest"
+      ? "no-store"
+      : hashedAsset
+        ? "public, max-age=31536000, immutable"
+        : "public, max-age=3600";
   response.writeHead(200, {
     "Content-Type": mimeTypes[extension] ?? "application/octet-stream",
-    "Cache-Control": filePath.endsWith("sw.js") ? "no-cache" : "public, max-age=3600"
+    "Cache-Control": cacheControl
   });
   createReadStream(filePath).pipe(response);
 }
@@ -239,67 +249,6 @@ function requireStringArray(value, label, maximumItems, maximumLength) {
     throw new HttpError(400, `${label}: слишком много элементов или неверный формат.`);
   }
   return value.map((entry, index) => requireString(entry, `${label}[${index}]`, maximumLength));
-}
-
-function validateFlatProjectionArray(value, label, maximumItems, keys, stringArrayKeys = []) {
-  if (!Array.isArray(value) || value.length > maximumItems) {
-    throw new HttpError(400, `${label}: слишком много элементов или неверный формат.`);
-  }
-  for (const [index, entry] of value.entries()) {
-    const item = requireExactKeys(entry, keys, `${label}[${index}]`);
-    for (const [key, field] of Object.entries(item)) {
-      if (stringArrayKeys.includes(key)) {
-        requireStringArray(field, `${label}[${index}].${key}`, 50, 200);
-      } else if (field !== null && !["string", "number", "boolean"].includes(typeof field)) {
-        throw new HttpError(400, `${label}[${index}].${key}: недопустимое значение.`);
-      } else if (typeof field === "number" && !Number.isFinite(field)) {
-        throw new HttpError(400, `${label}[${index}].${key}: недопустимое число.`);
-      }
-    }
-  }
-  return value;
-}
-
-function validateCodexSnapshot(value) {
-  const snapshot = requireExactKeys(value, ["schemaVersion", "writtenAt", "scope", "data"], "Снимок Codex");
-  if (snapshot.schemaVersion !== 1) throw new HttpError(400, "Снимок Codex имеет неизвестную версию.");
-  requireIsoDate(snapshot.writtenAt, "Снимок Codex.writtenAt");
-
-  const scopeKeys = ["tasks", "projects", "calendar", "notes", "reading"];
-  const scope = requireExactKeys(snapshot.scope, scopeKeys, "Снимок Codex.scope");
-  for (const key of scopeKeys) {
-    if (typeof scope[key] !== "boolean") throw new HttpError(400, `Снимок Codex.scope.${key}: ожидалось логическое значение.`);
-  }
-
-  const data = requireExactKeys(snapshot.data, ["tasks", "projects", "events", "notes", "readingItems"], "Снимок Codex.data");
-  validateFlatProjectionArray(data.tasks, "Снимок Codex.data.tasks", 10_000, [
-    "id", "title", "status", "projectId", "priority", "estimateMinutes", "energy", "context",
-    "dueDate", "scheduledDate", "completedAt", "recurrence", "generatedFromTaskId", "createdAt", "updatedAt"
-  ]);
-  validateFlatProjectionArray(data.projects, "Снимок Codex.data.projects", 2_000, [
-    "id", "title", "area", "color", "status", "nextReviewAt", "createdAt", "updatedAt"
-  ]);
-  validateFlatProjectionArray(data.events, "Снимок Codex.data.events", 10_000, [
-    "id", "title", "startAt", "endAt", "kind", "source", "taskId", "locked", "createdAt", "updatedAt"
-  ]);
-  validateFlatProjectionArray(data.notes, "Снимок Codex.data.notes", 2_000, [
-    "id", "title", "body", "projectId", "tags", "pinned", "createdAt", "updatedAt"
-  ], ["tags"]);
-  validateFlatProjectionArray(data.readingItems, "Снимок Codex.data.readingItems", 2_000, [
-    "id", "title", "summary", "body", "url", "source", "tags", "createdAt"
-  ], ["tags"]);
-
-  const categoryChecks = [
-    ["tasks", data.tasks],
-    ["projects", data.projects],
-    ["calendar", data.events],
-    ["notes", data.notes],
-    ["reading", data.readingItems]
-  ];
-  for (const [key, items] of categoryChecks) {
-    if (!scope[key] && items.length) throw new HttpError(400, `Снимок Codex содержит отключённую категорию ${key}.`);
-  }
-  return snapshot;
 }
 
 const svpVectorIds = new Set([
@@ -542,45 +491,6 @@ function writeJsonAtomic(filePath, value) {
 
 function removeIfExists(filePath) {
   if (existsSync(filePath)) unlinkSync(filePath);
-}
-
-function isPlainRecord(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isSafeNoteUpdatePayload(value) {
-  if (!isPlainRecord(value)) return false;
-  const keys = Object.keys(value);
-  const allowed = new Set(["title", "body", "projectId", "tags", "pinned"]);
-  if (!keys.length || keys.some((key) => !allowed.has(key))) return false;
-  if ("title" in value && (typeof value.title !== "string" || value.title.length > 500)) return false;
-  if ("body" in value && (typeof value.body !== "string" || value.body.length > 200_000)) return false;
-  if (
-    "projectId" in value &&
-    value.projectId !== null &&
-    (typeof value.projectId !== "string" || value.projectId.length > 128)
-  ) return false;
-  if (
-    "tags" in value &&
-    (!Array.isArray(value.tags) || value.tags.length > 100 ||
-      value.tags.some((tag) => typeof tag !== "string" || tag.length > 100))
-  ) return false;
-  if ("pinned" in value && typeof value.pinned !== "boolean") return false;
-  return true;
-}
-
-function isCodexCommand(entry) {
-  if (!entry || typeof entry.id !== "string" || typeof entry.type !== "string") return false;
-  if (entry.type === "add_task" || entry.type === "add_note" || entry.type === "add_reading") {
-    return Boolean(entry.payload && typeof entry.payload === "object" && typeof entry.payload.title === "string");
-  }
-  if (entry.type === "update_note") {
-    return typeof entry.entityId === "string" && isSafeNoteUpdatePayload(entry.payload);
-  }
-  if (entry.type === "update_task") {
-    return typeof entry.entityId === "string" && Boolean(entry.payload && typeof entry.payload === "object");
-  }
-  return entry.type === "complete_task" && typeof entry.entityId === "string";
 }
 
 function readCommands() {

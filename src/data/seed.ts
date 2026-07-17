@@ -4,6 +4,8 @@ import { createDefaultIntegrations } from "./integrations";
 import { createDefaultSettings } from "./settings";
 import { createDefaultWidgets } from "./widgets";
 import { createDefaultPersonalContext } from "../domain/profile/personalContext";
+import { createEmptyObjectGraph } from "../domain/objects/objectGraph";
+import { createLifeAreaTemplates } from "../domain/life/lifeAreas";
 
 export function createInitialState(): DashboardState {
   const now = new Date().toISOString();
@@ -14,6 +16,7 @@ export function createInitialState(): DashboardState {
     description: "Как устроены внимание, обязательства и устойчивый рабочий ритм.",
     color: "#7c5cff",
     archived: false,
+    showInTopNavigation: true,
     order: 0,
     createdAt: now,
     updatedAt: now
@@ -89,10 +92,10 @@ export function createInitialState(): DashboardState {
   ];
 
   return {
-    version: 12,
+    version: 13,
     tasks,
     projects: [project],
-    lifeAreas: [lifeArea],
+    lifeAreas: [lifeArea, ...createLifeAreaTemplates(now, 1)],
     events: [],
     notes: [],
     reflections: [],
@@ -103,6 +106,7 @@ export function createInitialState(): DashboardState {
     widgets: createDefaultWidgets(),
     readingItems: [],
     activityLog: [],
+    objectGraph: createEmptyObjectGraph(),
     updatedAt: now
   };
 }

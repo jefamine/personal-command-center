@@ -2,6 +2,7 @@ import type {
   CodexSnapshotScope,
   DashboardState
 } from "../types";
+import { safeExternalUrl } from "./url";
 
 const SAFE_DEFAULT_SCOPE: CodexSnapshotScope = {
   tasks: true,
@@ -112,7 +113,7 @@ export function buildCodexSnapshot(state: DashboardState) {
             title: item.title,
             summary: item.summary,
             body: item.body,
-            url: item.url,
+            url: safeExternalUrl(item.url) ?? "",
             source: item.source,
             tags: [...item.tags],
             createdAt: item.createdAt

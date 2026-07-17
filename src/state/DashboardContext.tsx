@@ -18,6 +18,18 @@ import {
 } from "../lib/date";
 import { loadState, saveState } from "../lib/storage";
 import { normalizeWidgetLayout } from "../lib/widgetLayout";
+import { safeExternalUrl } from "../lib/url";
+import {
+  addObjectRelation as addGraphRelation,
+  addUniversalObject as addGraphObject,
+  createUniversalObject,
+  patchUniversalObject,
+  removeObjectRelation as removeGraphRelation,
+  type ObjectRelation,
+  type ObjectRelationDraft,
+  type UniversalObject,
+  type UniversalObjectDraft
+} from "../domain/objects/objectGraph";
 import { lifeAreaTitleKey } from "../domain/life/lifeAreas";
 import { createDefaultPersonalContext, normalizePersonalContext } from "../domain/profile/personalContext";
 import { createReflectionNote } from "../domain/reflections/reflectionNote";
@@ -55,15 +67,28 @@ import type {
   ReflectionMemoryProjection,
   ReflectionSuggestionStatus,
   Task,
-  TaskDraft
+  TaskDraft,
+  TaskUpdate
 } from "../types";
 
 interface DashboardContextValue {
   state: DashboardState;
   ready: boolean;
   saving: boolean;
+  storageError: string | null;
+  addObject: (
+    draft: UniversalObjectDraft,
+    placement?: { parentId: string; kind?: "contains" | "embeds" }
+  ) => UniversalObject;
+  updateObject: (
+    id: string,
+    expectedRevision: number,
+    changes: Partial<Pick<UniversalObject, "title" | "roles" | "blocks" | "properties" | "status">>
+  ) => void;
+  addObjectRelation: (draft: ObjectRelationDraft) => ObjectRelation;
+  removeObjectRelation: (relationId: string) => void;
   addTask: (draft: TaskDraft) => Task;
-  updateTask: (id: string, changes: Partial<Task>) => void;
+  updateTask: (id: string, changes: TaskUpdate) => void;
   toggleTask: (id: string) => void;
   removeTask: (id: string) => void;
   addNote: (draft: NoteDraft) => Note;
@@ -107,6 +132,7 @@ interface DashboardContextValue {
   updateProject: (id: string, changes: Partial<Project>) => void;
   addLifeArea: (draft: LifeAreaDraft) => LifeArea | null;
   updateLifeArea: (id: string, changes: LifeAreaUpdate) => boolean;
+  moveLifeArea: (id: string, direction: "up" | "down") => boolean;
   removeLifeArea: (id: string) => boolean;
   assignProjectToLifeArea: (projectId: string, areaId: string | null) => void;
   addEvent: (draft: CalendarEventDraft) => CalendarEvent;
@@ -200,19 +226,105 @@ export function applyNoteUpdate(note: Note, changes: NoteUpdate, updatedAt: stri
   return next;
 }
 
+const editableTaskStatuses = new Set<Task["status"]>([
+  "inbox", "next", "planned", "waiting", "someday", "done"
+]);
+const editableTaskEnergy = new Set<Task["energy"]>(["low", "medium", "high"]);
+const editableTaskRecurrences = new Set<Task["recurrence"]>([
+  "none", "daily", "weekdays", "weekly", "monthly"
+]);
+
+function isTaskDate(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value));
+}
+
+function isTaskReference(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 128 && /^[a-zA-Z0-9._:-]+$/.test(value);
+}
+
+/** Applies only editable task fields and preserves durable identity and recurrence provenance. */
+export function applyTaskUpdate(task: Task, changes: TaskUpdate, updatedAt: string): Task {
+  const next = { ...task };
+  if (typeof changes.title === "string") {
+    const title = changes.title.trim();
+    if (title && title.length <= 500) next.title = title;
+  }
+  if (typeof changes.notes === "string" && changes.notes.length <= 200_000) next.notes = changes.notes;
+  if (typeof changes.status === "string" && editableTaskStatuses.has(changes.status)) next.status = changes.status;
+  if (changes.projectId === null || isTaskReference(changes.projectId)) next.projectId = changes.projectId;
+  if (Number.isInteger(changes.priority) && changes.priority! >= 1 && changes.priority! <= 4) {
+    next.priority = changes.priority as Task["priority"];
+  }
+  if (
+    Number.isInteger(changes.estimateMinutes) &&
+    changes.estimateMinutes! >= 0 &&
+    changes.estimateMinutes! <= 24 * 60
+  ) {
+    next.estimateMinutes = changes.estimateMinutes!;
+  }
+  if (typeof changes.energy === "string" && editableTaskEnergy.has(changes.energy)) next.energy = changes.energy;
+  if (typeof changes.context === "string" && changes.context.trim() && changes.context.length <= 200) {
+    next.context = changes.context;
+  }
+  if (changes.dueDate === null || isTaskDate(changes.dueDate)) next.dueDate = changes.dueDate;
+  if (changes.scheduledDate === null || isTaskDate(changes.scheduledDate)) {
+    next.scheduledDate = changes.scheduledDate;
+  }
+  if (typeof changes.recurrence === "string" && editableTaskRecurrences.has(changes.recurrence)) {
+    next.recurrence = changes.recurrence;
+  }
+  if (changes.completedAt === null || isTaskDate(changes.completedAt)) next.completedAt = changes.completedAt;
+
+  next.completedAt = next.status === "done" ? next.completedAt ?? updatedAt : null;
+  return {
+    ...next,
+    id: task.id,
+    generatedFromTaskId: task.generatedFromTaskId,
+    createdAt: task.createdAt,
+    updatedAt
+  };
+}
+
+/**
+ * Commits against an eagerly updated cell so sequential UI actions observe the latest revision.
+ * Domain errors are raised before React receives the new state and remain catchable by the caller.
+ */
+export function commitDashboardMutation(
+  cell: { current: DashboardState },
+  recipe: (current: DashboardState) => DashboardState,
+  updatedAt: string,
+  publish: (next: DashboardState) => void
+): DashboardState {
+  const current = cell.current;
+  const next = recipe(current);
+  if (next === current) return current;
+  const committed = { ...next, updatedAt };
+  cell.current = committed;
+  publish(committed);
+  return committed;
+}
+
 export function DashboardProvider({ children }: PropsWithChildren) {
   const [state, setState] = useState<DashboardState>(() => createInitialState());
+  const stateRef = useRef(state);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
     loadState()
       .then((stored) => {
-        if (active && stored) setState(stored);
+        if (active && stored) {
+          stateRef.current = stored;
+          setState(stored);
+        }
       })
-      .catch((error) => console.error("Не удалось загрузить локальные данные", error))
+      .catch((error) => {
+        console.error("Не удалось загрузить локальные данные", error);
+        setStorageError(error instanceof Error ? error.message : "Не удалось прочитать локальные данные.");
+      })
       .finally(() => {
         if (active) setReady(true);
       });
@@ -222,27 +334,120 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   }, []);
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || storageError) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     setSaving(true);
     saveTimer.current = window.setTimeout(() => {
       saveState(state)
-        .catch((error) => console.error("Не удалось сохранить локальные данные", error))
+        .catch((error) => {
+          console.error("Не удалось сохранить локальные данные", error);
+          setStorageError(error instanceof Error ? error.message : "Не удалось сохранить локальные данные.");
+        })
         .finally(() => setSaving(false));
     }, 250);
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
     };
-  }, [ready, state]);
+  }, [ready, state, storageError]);
 
   const mutate = useCallback((recipe: (current: DashboardState) => DashboardState) => {
-    setState((current) => {
-      const next = recipe(current);
-      return next === current
-        ? current
-        : { ...next, updatedAt: new Date().toISOString() };
-    });
+    commitDashboardMutation(stateRef, recipe, new Date().toISOString(), setState);
   }, []);
+
+  const replaceState = useCallback((replacement: DashboardState) => {
+    stateRef.current = replacement;
+    setState(replacement);
+  }, []);
+
+  const addObject = useCallback(
+    (
+      draft: UniversalObjectDraft,
+      placement?: { parentId: string; kind?: "contains" | "embeds" }
+    ) => {
+      const now = new Date().toISOString();
+      const object = createUniversalObject(draft, { now });
+      mutate((current) => {
+        let objectGraph = addGraphObject(current.objectGraph, object);
+        if (placement) {
+          objectGraph = addGraphRelation(objectGraph, {
+            kind: placement.kind ?? "contains",
+            fromId: placement.parentId,
+            toId: object.id
+          }, { now });
+        }
+        return {
+          ...current,
+          objectGraph,
+          activityLog: withActivity(current, "object_created", object.id, {
+            parentId: placement?.parentId ?? null,
+            relation: placement?.kind ?? (placement ? "contains" : null)
+          })
+        };
+      });
+      return object;
+    },
+    [mutate]
+  );
+
+  const updateObject = useCallback(
+    (
+      id: string,
+      expectedRevision: number,
+      changes: Partial<Pick<UniversalObject, "title" | "roles" | "blocks" | "properties" | "status">>
+    ) => {
+      mutate((current) => ({
+        ...current,
+        objectGraph: patchUniversalObject(current.objectGraph, id, changes, {
+          expectedRevision,
+          now: new Date().toISOString()
+        }),
+        activityLog: withActivity(current, "object_updated", id)
+      }));
+    },
+    [mutate]
+  );
+
+  const addObjectRelation = useCallback(
+    (draft: ObjectRelationDraft) => {
+      const now = new Date().toISOString();
+      const relation: ObjectRelation = {
+        id: draft.id ?? crypto.randomUUID(),
+        kind: draft.kind,
+        fromId: draft.fromId,
+        toId: draft.toId,
+        order: draft.order ?? 0,
+        createdAt: now
+      };
+      mutate((current) => ({
+        ...current,
+        objectGraph: addGraphRelation(current.objectGraph, relation, {
+          now,
+          idFactory: () => relation.id
+        }),
+        activityLog: withActivity(current, "object_relation_added", relation.id, {
+          kind: relation.kind,
+          fromId: relation.fromId,
+          toId: relation.toId
+        })
+      }));
+      return relation;
+    },
+    [mutate]
+  );
+
+  const removeObjectRelation = useCallback(
+    (relationId: string) => {
+      mutate((current) => {
+        if (!current.objectGraph.relations.some((relation) => relation.id === relationId)) return current;
+        return {
+          ...current,
+          objectGraph: removeGraphRelation(current.objectGraph, relationId),
+          activityLog: withActivity(current, "object_relation_removed", relationId)
+        };
+      });
+    },
+    [mutate]
+  );
 
   const addTask = useCallback(
     (draft: TaskDraft) => {
@@ -252,7 +457,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         title: draft.title.trim(),
         notes: draft.notes ?? "",
         status: draft.status ?? "inbox",
-        projectId: draft.projectId ?? null,
+        projectId:
+          draft.projectId && state.projects.some((project) => project.id === draft.projectId)
+            ? draft.projectId
+            : null,
         priority: draft.priority ?? 2,
         estimateMinutes: draft.estimateMinutes ?? 25,
         energy: draft.energy ?? "medium",
@@ -272,24 +480,31 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       }));
       return task;
     },
-    [mutate]
+    [mutate, state.projects]
   );
 
   const updateTask = useCallback(
-    (id: string, changes: Partial<Task>) => {
-      mutate((current) => ({
-        ...current,
-        tasks: current.tasks.map((task) =>
-          task.id === id
-            ? { ...task, ...changes, id: task.id, updatedAt: new Date().toISOString() }
-            : task
-        ),
-        events: current.events.map((event) =>
-          event.taskId === id && changes.title
-            ? { ...event, title: changes.title, updatedAt: new Date().toISOString() }
-            : event
-        )
-      }));
+    (id: string, changes: TaskUpdate) => {
+      mutate((current) => {
+        const existing = current.tasks.find((task) => task.id === id);
+        if (!existing) return current;
+        const updatedAt = new Date().toISOString();
+        const safeChanges =
+          typeof changes.projectId === "string" &&
+          !current.projects.some((project) => project.id === changes.projectId)
+            ? { ...changes, projectId: undefined }
+            : changes;
+        const updated = applyTaskUpdate(existing, safeChanges, updatedAt);
+        return {
+          ...current,
+          tasks: current.tasks.map((task) => task.id === id ? updated : task),
+          events: current.events.map((event) =>
+            event.taskId === id && updated.title !== existing.title
+              ? { ...event, title: updated.title, updatedAt }
+              : event
+          )
+        };
+      });
     },
     [mutate]
   );
@@ -376,7 +591,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         id: crypto.randomUUID(),
         title: draft.title.trim() || "Без названия",
         body: draft.body ?? "",
-        projectId: draft.projectId ?? null,
+        projectId:
+          draft.projectId && state.projects.some((project) => project.id === draft.projectId)
+            ? draft.projectId
+            : null,
         tags: draft.tags ?? [],
         pinned: draft.pinned ?? false,
         createdAt: now,
@@ -389,7 +607,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       }));
       return note;
     },
-    [mutate]
+    [mutate, state.projects]
   );
 
   const updateNote = useCallback(
@@ -1107,6 +1325,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         description: draft.description?.trim() ?? "",
         color,
         archived: false,
+        showInTopNavigation: true,
         order: state.lifeAreas.length,
         createdAt: now,
         updatedAt: now
@@ -1143,12 +1362,44 @@ export function DashboardProvider({ children }: PropsWithChildren) {
             ? { color: changes.color }
             : {}),
           ...(typeof changes.archived === "boolean" ? { archived: changes.archived } : {}),
+          ...(typeof changes.showInTopNavigation === "boolean"
+            ? { showInTopNavigation: changes.showInTopNavigation }
+            : {}),
           updatedAt: now
         } : area),
         projects: current.projects.map((project) => project.areaId === id
           ? { ...project, area: title, updatedAt: now }
           : project),
         activityLog: withActivity(current, "life_area_updated", id)
+      }));
+      return true;
+    },
+    [mutate, state.lifeAreas]
+  );
+
+  const moveLifeArea = useCallback(
+    (id: string, direction: "up" | "down") => {
+      const active = [...state.lifeAreas]
+        .filter((area) => !area.archived)
+        .sort((left, right) => left.order - right.order);
+      const index = active.findIndex((area) => area.id === id);
+      const targetIndex = direction === "up" ? index - 1 : index + 1;
+      if (index < 0 || targetIndex < 0 || targetIndex >= active.length) return false;
+
+      const source = active[index];
+      const target = active[targetIndex];
+      const now = new Date().toISOString();
+      mutate((current) => ({
+        ...current,
+        lifeAreas: current.lifeAreas
+          .map((area) => {
+            if (area.id === source.id) return { ...area, order: target.order, updatedAt: now };
+            if (area.id === target.id) return { ...area, order: source.order, updatedAt: now };
+            return area;
+          })
+          .sort((left, right) => left.order - right.order)
+          .map((area, order) => ({ ...area, order })),
+        activityLog: withActivity(current, "life_area_updated", id, { direction })
       }));
       return true;
     },
@@ -1381,7 +1632,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         title: draft.title.trim(),
         summary: draft.summary ?? "",
         body: draft.body ?? "",
-        url: draft.url ?? "",
+        url: safeExternalUrl(draft.url) ?? "",
         source: draft.source ?? "Вручную",
         tags: draft.tags ?? [],
         createdAt: new Date().toISOString()
@@ -1407,6 +1658,11 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       state,
       ready,
       saving,
+      storageError,
+      addObject,
+      updateObject,
+      addObjectRelation,
+      removeObjectRelation,
       addTask,
       updateTask,
       toggleTask,
@@ -1433,6 +1689,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       updateProject,
       addLifeArea,
       updateLifeArea,
+      moveLifeArea,
       removeLifeArea,
       assignProjectToLifeArea,
       addEvent,
@@ -1448,12 +1705,17 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       updateWidgets,
       addReadingItem,
       removeReadingItem,
-      replaceState: setState
+      replaceState
     }),
     [
       state,
       ready,
       saving,
+      storageError,
+      addObject,
+      updateObject,
+      addObjectRelation,
+      removeObjectRelation,
       addTask,
       updateTask,
       toggleTask,
@@ -1480,6 +1742,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       updateProject,
       addLifeArea,
       updateLifeArea,
+      moveLifeArea,
       removeLifeArea,
       assignProjectToLifeArea,
       addEvent,
@@ -1494,7 +1757,8 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       updateCodexIntegration,
       updateWidgets,
       addReadingItem,
-      removeReadingItem
+      removeReadingItem,
+      replaceState
     ]
   );
 

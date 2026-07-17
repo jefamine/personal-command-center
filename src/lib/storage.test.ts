@@ -4,10 +4,81 @@ import { createDefaultIntegrations } from "../data/integrations";
 import { createDefaultSettings } from "../data/settings";
 import { createDefaultWidgets } from "../data/widgets";
 import { createDefaultPersonalContext } from "../domain/profile/personalContext";
-import { acceptReflectionAnalysis, applyNoteUpdate } from "../state/DashboardContext";
-import type { Note, ReflectionAnalysisResponse, ReflectionEntry } from "../types";
+import { createInitialState } from "../data/seed";
+import {
+  addUniversalObject,
+  createUniversalObject,
+  ObjectGraphError,
+  patchUniversalObject
+} from "../domain/objects/objectGraph";
+import {
+  acceptReflectionAnalysis,
+  applyNoteUpdate,
+  applyTaskUpdate,
+  commitDashboardMutation
+} from "../state/DashboardContext";
+import type { Note, ReflectionAnalysisResponse, ReflectionEntry, Task } from "../types";
 
 describe("storage migration", () => {
+  it("отклоняет неизвестную будущую версию вместо молчаливого понижения", () => {
+    const future = { ...createInitialState(), version: 14 };
+    expect(() => migrateState(future as never)).toThrow("Неподдерживаемая версия");
+  });
+
+  it("сохраняет нативный объект при повторной нормализации v13", () => {
+    const state = createInitialState();
+    const object = createUniversalObject({ id: "native-doc", roles: ["document"], title: "Документ" }, {
+      now: state.updatedAt
+    });
+    state.objectGraph = addUniversalObject(state.objectGraph, object);
+
+    const migrated = migrateState(state);
+    expect(migrated.version).toBe(13);
+    expect(migrated.objectGraph.objects).toEqual([expect.objectContaining({ id: "native-doc" })]);
+    expect(migrateState(migrated)).toEqual(migrated);
+  });
+
+  it("добавляет согласованные сферы в прежнее стартовое состояние и не повторяет миграцию", () => {
+    const state = createInitialState();
+    const { lifeAreaTemplatesVersion: _templateVersion, ...legacySettings } = state.settings;
+    const previousPrototype = {
+      ...state,
+      lifeAreas: [state.lifeAreas[0]],
+      settings: { ...legacySettings, sidebarCollapsed: false }
+    };
+
+    const migrated = migrateState(previousPrototype as never);
+    expect(migrated.lifeAreas.map((area) => area.title)).toEqual([
+      "Личная эффективность", "Семья", "Работа", "Познание себя", "Здоровье", "Досуг"
+    ]);
+    expect(migrated.settings).toMatchObject({
+      sidebarCollapsed: true,
+      lifeAreaTemplatesVersion: 1
+    });
+    expect(migrateState(migrated)).toEqual(migrated);
+  });
+
+  it("отклоняет повреждённый объектный слой v13 без молчаливой потери записей", () => {
+    const state = createInitialState();
+    const broken = {
+      ...state,
+      objectGraph: {
+        schemaVersion: 1,
+        objects: [{ id: "incomplete-object" }],
+        relations: []
+      }
+    };
+
+    expect(() => migrateState(broken as never)).toThrowError(
+      expect.objectContaining({ code: "invalid_object" })
+    );
+  });
+
+  it("останавливает загрузку повреждённой канонической сущности v13 до автосохранения", () => {
+    const broken = { ...createInitialState(), tasks: [{}] };
+    expect(() => migrateState(broken as never)).toThrow("Локальные данные v13 повреждены");
+  });
+
   it("добавляет календарь в состояние первой версии", () => {
     const migrated = migrateState({
       version: 1,
@@ -26,7 +97,8 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
 
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
+    expect(migrated.objectGraph).toEqual({ schemaVersion: 1, objects: [], relations: [] });
     expect(migrated.events).toEqual([]);
     expect(migrated.notes).toEqual([]);
     expect(migrated.integrations.codex.enabled).toBe(true);
@@ -64,7 +136,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
 
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.settings.userName).toBe("Анна");
     expect(migrated.settings.theme).toBe("dark");
     expect(migrated.settings.cornerStyle).toBe("rounded");
@@ -113,7 +185,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
 
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.reflections).toEqual([]);
     expect(migrated.widgets.filter((widget) => widget.type === "reflection")).toHaveLength(1);
     expect(migrated.widgets.find((widget) => widget.type === "recommendations")?.enabled).toBe(false);
@@ -162,7 +234,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T10:01:00.000Z"
     });
 
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.reflections).toHaveLength(1);
     expect(migrated.reflections[0]).toMatchObject({
       id: "legacy-reflection",
@@ -251,7 +323,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(v8);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.notes[0]).toEqual({ ...existingNote, origin: "reflection" });
     expect(migrated.reflections[0].noteId).toBe("existing-note");
     expect(migrated.reflections[1].noteId).toBe("reflection-note-needs-note");
@@ -325,6 +397,101 @@ describe("storage migration", () => {
     expect(migrateState(migrated)).toEqual(migrated);
   });
 
+  it("rejects a v13 backup when any canonical entity has an unsafe runtime shape", async () => {
+    const state = createInitialState();
+    const fileFrom = (value: unknown) => ({
+      text: async () => JSON.stringify(value)
+    }) as File;
+    const invalidBackups: unknown[] = [
+      { ...state, tasks: [{}] },
+      { ...state, tasks: [{ ...state.tasks[0], priority: "4" }] },
+      { ...state, projects: [{ ...state.projects[0], color: 42 }] },
+      { ...state, lifeAreas: [{ ...state.lifeAreas[0], archived: "false" }] },
+      {
+        ...state,
+        events: [{
+          id: "bad-event",
+          title: "Broken",
+          startAt: state.updatedAt,
+          endAt: state.updatedAt,
+          kind: "focus",
+          source: "local",
+          taskId: null,
+          notes: "",
+          locked: "false",
+          createdAt: state.updatedAt,
+          updatedAt: state.updatedAt
+        }]
+      },
+      {
+        ...state,
+        notes: [{
+          id: "bad-note",
+          title: "Broken",
+          body: "",
+          projectId: null,
+          tags: ["valid", 7],
+          pinned: false,
+          createdAt: state.updatedAt,
+          updatedAt: state.updatedAt
+        }]
+      },
+      { ...state, reflections: [{}] },
+      { ...state, assistantMemory: [{}] },
+      {
+        ...state,
+        personalContext: {
+          ...state.personalContext,
+          systemProfile: { ...state.personalContext.systemProfile, mode: 1 }
+        }
+      },
+      { ...state, settings: { ...state.settings, dailyCapacityMinutes: "360" } },
+      {
+        ...state,
+        integrations: {
+          ...state.integrations,
+          codex: {
+            ...state.integrations.codex,
+            snapshotScope: { ...state.integrations.codex.snapshotScope, notes: "false" }
+          }
+        }
+      },
+      { ...state, widgets: [{ ...state.widgets[0], config: { unsupported: true } }] },
+      {
+        ...state,
+        readingItems: [{
+          id: "bad-reading",
+          title: "Broken",
+          summary: "",
+          body: "",
+          url: "",
+          source: "",
+          tags: [],
+          createdAt: "not-a-date"
+        }]
+      },
+      {
+        ...state,
+        activityLog: [{
+          id: "bad-activity",
+          type: "task_created",
+          entityId: null,
+          timestamp: state.updatedAt,
+          metadata: { nested: { overwrite: true } }
+        }]
+      },
+      {
+        ...state,
+        objectGraph: { schemaVersion: 1, objects: [{}], relations: [] }
+      }
+    ];
+
+    for (const backup of invalidBackups) {
+      await expect(readBackup(fileFrom(backup))).rejects.toThrow();
+    }
+    await expect(readBackup(fileFrom(state))).resolves.toEqual(state);
+  });
+
   it("normalizes valid v9 memory items and rejects empty, malformed or duplicate items", () => {
     const v9 = migrateState({
       version: 8,
@@ -343,6 +510,7 @@ describe("storage migration", () => {
     });
     const normalized = migrateState({
       ...v9,
+      version: 9,
       assistantMemory: [
         {
           id: "memory-1",
@@ -395,7 +563,7 @@ describe("storage migration", () => {
           updatedAt: "2026-07-15T10:00:00.000Z"
         }
       ]
-    } as typeof v9);
+    } as unknown as Parameters<typeof migrateState>[0]);
 
     expect(normalized.assistantMemory).toHaveLength(2);
     expect(normalized.assistantMemory[0]).toMatchObject({
@@ -457,7 +625,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(v9);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.reflections[0]).toMatchObject({
       originalText,
       status: "queued",
@@ -479,7 +647,7 @@ describe("storage migration", () => {
     };
     expect(migrateState(withReferences)).toEqual(withReferences);
 
-    const malformed = migrateState({
+    expect(() => migrateState({
       ...withReferences,
       reflections: withReferences.reflections.map((entry) => ({
         ...entry,
@@ -488,9 +656,7 @@ describe("storage migration", () => {
           { id: "memory-v9", updatedAt: "2026-07-15T09:31:00.000Z" }
         ]
       }))
-    });
-    expect(malformed.reflections[0].status).toBe("captured");
-    expect(malformed.reflections[0].analysisMemoryRefs).toEqual([]);
+    })).toThrow("Локальные данные v13 повреждены");
   });
 
   it("adds no retroactive suggestions in v10 and normalizes v11 suggestions all-or-nothing", () => {
@@ -541,7 +707,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(legacyV10);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.reflections[0].suggestions).toEqual([]);
 
     const suggestion = {
@@ -565,15 +731,13 @@ describe("storage migration", () => {
     };
     expect(migrateState(validV11)).toEqual(validV11);
 
-    const malformed = migrateState({
+    expect(() => migrateState({
       ...validV11,
       reflections: validV11.reflections.map((entry) => ({
         ...entry,
         suggestions: [suggestion, { ...suggestion, text: "Повтор" }]
       }))
-    });
-    expect(malformed.reflections[0].analysis).toEqual(analysis);
-    expect(malformed.reflections[0].suggestions).toEqual([]);
+    })).toThrow("Локальные данные v13 повреждены");
 
     const questionSuggestion = {
       ...suggestion,
@@ -631,7 +795,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(legacyV11);
-    expect(migrated.version).toBe(12);
+    expect(migrated.version).toBe(13);
     expect(migrated.lifeAreas).toHaveLength(1);
     expect(migrated.lifeAreas[0].title).toBe("Работа");
     expect(migrated.projects[0]).toMatchObject({
@@ -701,7 +865,7 @@ describe("storage migration", () => {
 
     for (const backup of backups) {
       const imported = await readBackup(fileFrom(backup));
-      expect(imported.version).toBe(12);
+      expect(imported.version).toBe(13);
       expect(imported.personalContext).toEqual(createDefaultPersonalContext());
     }
 
@@ -857,5 +1021,84 @@ describe("note privacy provenance", () => {
       tags: [],
       updatedAt: "2026-07-15T11:00:00.000Z"
     });
+  });
+});
+
+describe("task identity and recurrence provenance", () => {
+  it("never lets a generic update replace durable fields and ignores invalid values", () => {
+    const task: Task = {
+      id: "task-1",
+      title: "Исходная задача",
+      notes: "",
+      status: "next",
+      projectId: null,
+      priority: 2,
+      estimateMinutes: 25,
+      energy: "medium",
+      context: "Везде",
+      dueDate: null,
+      scheduledDate: null,
+      completedAt: null,
+      recurrence: "weekly",
+      generatedFromTaskId: "task-template",
+      createdAt: "2026-07-15T10:00:00.000Z",
+      updatedAt: "2026-07-15T10:00:00.000Z"
+    };
+    const malicious = {
+      title: "  Новое название  ",
+      priority: 99,
+      estimateMinutes: -10,
+      status: "unknown",
+      id: "replacement",
+      generatedFromTaskId: "replacement-template",
+      createdAt: "replacement"
+    } as unknown as Parameters<typeof applyTaskUpdate>[1];
+
+    expect(applyTaskUpdate(task, malicious, "2026-07-15T11:00:00.000Z")).toEqual({
+      ...task,
+      title: "Новое название",
+      updatedAt: "2026-07-15T11:00:00.000Z"
+    });
+  });
+
+  it("keeps completion timestamp consistent with task status", () => {
+    const task = createInitialState().tasks[0];
+    const completed = applyTaskUpdate(task, { status: "done" }, "2026-07-15T11:00:00.000Z");
+    expect(completed.completedAt).toBe("2026-07-15T11:00:00.000Z");
+
+    const reopened = applyTaskUpdate(completed, { status: "next" }, "2026-07-15T12:00:00.000Z");
+    expect(reopened.completedAt).toBeNull();
+  });
+});
+
+describe("atomic dashboard mutations", () => {
+  it("raises a stale object revision synchronously without replacing the last valid state", () => {
+    const initial = createInitialState();
+    const object = createUniversalObject({ id: "atomic-document", title: "Версия 1" }, {
+      now: initial.updatedAt
+    });
+    initial.objectGraph = addUniversalObject(initial.objectGraph, object);
+    const cell = { current: initial };
+    const published: typeof initial[] = [];
+
+    commitDashboardMutation(cell, (current) => ({
+      ...current,
+      objectGraph: patchUniversalObject(current.objectGraph, object.id, { title: "Версия 2" }, {
+        expectedRevision: object.revision,
+        now: "2026-07-15T11:00:00.000Z"
+      })
+    }), "2026-07-15T11:00:00.000Z", (next) => published.push(next));
+
+    const committed = cell.current;
+    expect(() => commitDashboardMutation(cell, (current) => ({
+      ...current,
+      objectGraph: patchUniversalObject(current.objectGraph, object.id, { title: "Устаревшая запись" }, {
+        expectedRevision: object.revision,
+        now: "2026-07-15T11:01:00.000Z"
+      })
+    }), "2026-07-15T11:01:00.000Z", (next) => published.push(next))).toThrow(ObjectGraphError);
+
+    expect(cell.current).toBe(committed);
+    expect(published).toHaveLength(1);
   });
 });

@@ -1,37 +1,25 @@
-import { useEffect, useState } from "react";
-import { Sidebar } from "./components/Sidebar";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { MobileNav } from "./components/MobileNav";
+import { NavigationTrail } from "./components/NavigationTrail";
+import { Sidebar } from "./components/Sidebar";
 import { TaskEditor } from "./components/TaskEditor";
 import { TopBar } from "./components/TopBar";
-import { CalendarView } from "./views/CalendarView";
-import { InboxView } from "./views/InboxView";
-import { IntegrationsView } from "./views/IntegrationsView";
-import { InsightsView } from "./views/InsightsView";
-import { JournalView } from "./views/JournalView";
-import { LifeView } from "./views/LifeView";
-import { NotesView } from "./views/NotesView";
-import { ProjectsView } from "./views/ProjectsView";
-import { ReviewView } from "./views/ReviewView";
-import { SettingsView } from "./views/SettingsView";
-import { TasksView } from "./views/TasksView";
-import { TodayView } from "./views/TodayView";
+import { legacyObjectReference } from "./domain/objects/legacyAdapter";
+import { useAppNavigation } from "./navigation/NavigationContext";
+import { legacyViewToRoute } from "./navigation/router";
 import { useDashboard } from "./state/DashboardContext";
 import type { ViewId } from "./types";
+import { GtdView } from "./views/GtdView";
+import { TodayView } from "./views/TodayView";
 
-const viewIds: ViewId[] = [
-  "today",
-  "life",
-  "inbox",
-  "tasks",
-  "projects",
-  "calendar",
-  "journal",
-  "notes",
-  "integrations",
-  "review",
-  "insights",
-  "settings"
-];
+const InsightsView = lazy(() => import("./views/InsightsView").then((module) => ({ default: module.InsightsView })));
+const IntegrationsView = lazy(() => import("./views/IntegrationsView").then((module) => ({ default: module.IntegrationsView })));
+const JournalView = lazy(() => import("./views/JournalView").then((module) => ({ default: module.JournalView })));
+const LifeView = lazy(() => import("./views/LifeView").then((module) => ({ default: module.LifeView })));
+const ObjectView = lazy(() => import("./views/ObjectView").then((module) => ({ default: module.ObjectView })));
+const SettingsView = lazy(() => import("./views/SettingsView").then((module) => ({ default: module.SettingsView })));
+const SphereView = lazy(() => import("./views/SphereView").then((module) => ({ default: module.SphereView })));
+const WorkspaceView = lazy(() => import("./views/WorkspaceView").then((module) => ({ default: module.WorkspaceView })));
 
 function readableTextColor(hex: string) {
   const value = /^#[0-9a-f]{6}$/i.test(hex) ? hex.slice(1) : "cfee45";
@@ -41,17 +29,52 @@ function readableTextColor(hex: string) {
   return luminance > 0.52 ? "#101410" : "#ffffff";
 }
 
-function initialView(): ViewId {
-  const requested = new URLSearchParams(window.location.search).get("view") as ViewId | null;
-  return requested && viewIds.includes(requested) ? requested : "today";
-}
-
 export default function App() {
-  const { state, ready } = useDashboard();
-  const [view, setView] = useState<ViewId>(initialView);
+  const { state, ready, storageError, updateSettings } = useDashboard();
+  const { route, navigate } = useAppNavigation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sidebarPeeking, setSidebarPeeking] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
+
+  const openMenu = useCallback((event?: SyntheticEvent<HTMLElement>) => {
+    const trigger = event?.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    if (trigger) menuTriggerRef.current = trigger;
+    setSidebarPeeking(false);
+    setMenuOpen(true);
+  }, []);
+
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+    setSidebarPeeking(false);
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setMenuOpen(false);
+    setSidebarPeeking(false);
+    updateSettings({ sidebarCollapsed: !state.settings.sidebarCollapsed });
+  }, [state.settings.sidebarCollapsed, updateSettings]);
+
+  const handleTopMenu = useCallback(() => {
+    if (window.matchMedia("(min-width: 1181px)").matches) {
+      toggleSidebar();
+      return;
+    }
+    openMenu();
+  }, [openMenu, toggleSidebar]);
+
+  const startSidebarPeek = useCallback(() => {
+    if (state.settings.sidebarCollapsed && !menuOpen) setSidebarPeeking(true);
+  }, [menuOpen, state.settings.sidebarCollapsed]);
+
+  const endSidebarPeek = useCallback(() => {
+    if (!menuOpen) setSidebarPeeking(false);
+  }, [menuOpen]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -69,59 +92,113 @@ export default function App() {
   }, [state.settings]);
 
   useEffect(() => {
-    const url = new URL(window.location.href);
-    if (view === "today") url.searchParams.delete("view");
-    else url.searchParams.set("view", view);
-    window.history.replaceState(null, "", url);
-  }, [view]);
+    mainRef.current?.focus({ preventScroll: true });
+  }, [route]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [menuOpen]);
 
   if (!ready) {
     return <div className="app-loading"><div className="loading-mark" /><span>Собираю ваш день…</span></div>;
   }
 
+  if (storageError) {
+    return (
+      <div className="app-storage-error" role="alert">
+        <div>
+          <span>Локальные данные не изменены</span>
+          <h1>Не удалось безопасно открыть хранилище</h1>
+          <p>{storageError}</p>
+          <p>Автосохранение остановлено, поэтому исходная база не будет перезаписана. Восстановите данные из резервной копии или обновите приложение.</p>
+          <button type="button" className="primary-button" onClick={() => window.location.reload()}>Попробовать снова</button>
+        </div>
+      </div>
+    );
+  }
+
+  const navigateLegacy = (view: ViewId) => navigate(legacyViewToRoute(view));
+  const inboxCount = state.tasks.filter((task) => task.status === "inbox").length;
+
   const content = (() => {
-    switch (view) {
-      case "today": return <TodayView onOpenInbox={() => setView("inbox")} onOpenTasks={() => setView("tasks")} onEditTask={setEditingTaskId} onNavigate={setView} />;
-      case "life": return <LifeView onOpenProjects={() => setView("projects")} />;
-      case "inbox": return <InboxView />;
-      case "tasks": return <TasksView onEditTask={setEditingTaskId} />;
-      case "projects": return <ProjectsView onEditTask={setEditingTaskId} onOpenLife={() => setView("life")} />;
-      case "calendar": return <CalendarView />;
-      case "journal": return <JournalView onOpenNote={(noteId) => { setSelectedNoteId(noteId); setView("notes"); }} />;
-      case "notes": return <NotesView initialNoteId={selectedNoteId} />;
-      case "integrations": return <IntegrationsView />;
-      case "review": return <ReviewView onNavigate={setView} />;
-      case "insights": return <InsightsView />;
-      case "settings": return <SettingsView />;
+    if (route.kind === "home") {
+      return (
+        <TodayView
+          onOpenInbox={() => navigate({ kind: "gtd", section: "inbox" })}
+          onOpenTasks={() => navigate({ kind: "gtd", section: "tasks" })}
+          onEditTask={setEditingTaskId}
+          onNavigate={navigateLegacy}
+        />
+      );
+    }
+    if (route.kind === "gtd") return <GtdView section={route.section} onEditTask={setEditingTaskId} />;
+    if (route.kind === "sphere") return <SphereView sphereId={route.sphereId} />;
+    if (route.kind === "object") return <ObjectView objectId={route.objectId} onEditTask={setEditingTaskId} />;
+
+    switch (route.tool) {
+      case "workspace":
+        return <WorkspaceView />;
+      case "sphere-manager":
+        return <LifeView onOpenProjects={() => navigate({ kind: "gtd", section: "projects" })} />;
+      case "reflections":
+        return (
+          <JournalView
+            onOpenNote={(noteId) => navigate(
+              { kind: "object", objectId: legacyObjectReference("note", noteId) },
+              { preserveTrail: true }
+            )}
+          />
+        );
+      case "insights":
+        return <InsightsView />;
+      case "integrations":
+        return <IntegrationsView />;
+      case "settings":
+        return <SettingsView />;
     }
   })();
 
   return (
     <div className="app-shell">
       <Sidebar
-        activeView={view}
+        route={route}
+        lifeAreas={state.lifeAreas}
         open={menuOpen}
-        collapsed={false}
-        peeking={false}
-        onSelect={setView}
-        onClose={() => setMenuOpen(false)}
-        onToggleCollapse={() => setMenuOpen(false)}
-        onPeekStart={() => undefined}
-        onPeekEnd={() => undefined}
-        inboxCount={state.tasks.filter((task) => task.status === "inbox").length}
+        collapsed={state.settings.sidebarCollapsed}
+        peeking={sidebarPeeking}
+        modal={menuOpen}
+        returnFocusRef={menuTriggerRef}
+        onClose={closeMenu}
+        onToggleCollapse={toggleSidebar}
+        onPeekStart={startSidebarPeek}
+        onPeekEnd={endSidebarPeek}
+        inboxCount={inboxCount}
       />
-      <div className="app-main sidebar-collapsed">
+      <div className={`app-main ${state.settings.sidebarCollapsed ? "sidebar-collapsed" : ""}`} inert={menuOpen}>
         <TopBar
-          activeView={view}
-          inboxCount={state.tasks.filter((task) => task.status === "inbox").length}
-          onMenu={() => setMenuOpen(true)}
-          onSearch={() => setView("tasks")}
-          onSelect={setView}
+          route={route}
+          lifeAreas={state.lifeAreas}
+          inboxCount={inboxCount}
+          menuOpen={menuOpen}
+          onMenu={handleTopMenu}
+          onSearch={() => navigate({ kind: "gtd", section: "tasks" })}
         />
-        <main>{content}</main>
+        <NavigationTrail />
+        <main ref={mainRef} tabIndex={-1}>
+          <Suspense fallback={<div className="view-loading" role="status">Открываю пространство…</div>}>
+            {content}
+          </Suspense>
+        </main>
       </div>
-      <TaskEditor taskId={editingTaskId} onClose={() => setEditingTaskId(null)} />
-      <MobileNav activeView={view} inboxCount={state.tasks.filter((task) => task.status === "inbox").length} onSelect={setView} />
+      <div className="app-background-overlays" inert={menuOpen}>
+        <TaskEditor taskId={editingTaskId} onClose={() => setEditingTaskId(null)} />
+        <MobileNav route={route} inboxCount={inboxCount} onMenu={openMenu} />
+      </div>
     </div>
   );
 }

@@ -1,7 +1,9 @@
 import {
   Archive,
   ArchiveRestore,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
   Check,
   Compass,
   FolderKanban,
@@ -27,6 +29,7 @@ export function LifeView({ onOpenProjects }: LifeViewProps) {
     state,
     addLifeArea,
     updateLifeArea,
+    moveLifeArea,
     removeLifeArea,
     assignProjectToLifeArea
   } = useDashboard();
@@ -49,6 +52,13 @@ export function LifeView({ onOpenProjects }: LifeViewProps) {
       .sort((left, right) => left.order - right.order),
     [showArchived, state.lifeAreas]
   );
+  const activeAreas = useMemo(
+    () => [...state.lifeAreas]
+      .filter((area) => !area.archived)
+      .sort((left, right) => left.order - right.order),
+    [state.lifeAreas]
+  );
+  const selectedActiveIndex = selected ? activeAreas.findIndex((area) => area.id === selected.id) : -1;
   const unassignedProjects = state.projects.filter((project) => !project.areaId);
   const activeProjects = state.projects.filter((project) => project.status === "active");
   const openTasks = state.tasks.filter((task) => task.status !== "done");
@@ -145,7 +155,7 @@ export function LifeView({ onOpenProjects }: LifeViewProps) {
             return (
               <article className={`life-area-card ${area.archived ? "is-archived" : ""}`} key={area.id} style={{ "--area-color": area.color } as React.CSSProperties}>
                 <div className="life-area-accent" />
-                <header><span className="life-area-mark"><Compass size={19} /></span><div><small>{area.archived ? "В архиве" : "Сфера жизни"}</small><h2>{area.title}</h2></div><button className="small-button" onClick={() => setSelectedId(area.id)}>Настроить</button></header>
+                <header><span className="life-area-mark"><Compass size={19} /></span><div><small>{area.archived ? "В архиве" : "Сфера жизни"}</small><h2>{area.title}</h2></div><button className="small-button" onClick={() => setSelectedId(area.id)} aria-label={`Настроить сферу ${area.title}`}>Настроить</button></header>
                 <p>{area.description || "Добавьте пояснение, чтобы зафиксировать смысл этой сферы для себя."}</p>
                 <div className="life-area-metrics"><span><strong>{active.length}</strong><small>активных проектов</small></span><span><strong>{tasks.length}</strong><small>открытых действий</small></span><span><strong>{minutes}</strong><small>минут в задачах</small></span></div>
                 {active.length ? <div className="life-area-projects">{active.slice(0, 3).map((project) => <button key={project.id} onClick={onOpenProjects}><i style={{ background: project.color }} /><span>{project.title}</span><ArrowRight size={14} /></button>)}</div> : <div className="life-area-empty">Здесь пока нет активных проектов.</div>}
@@ -173,6 +183,27 @@ export function LifeView({ onOpenProjects }: LifeViewProps) {
               <label><span>Название</span><input maxLength={80} value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /></label>
               <label><span>Что объединяет эта сфера</span><textarea rows={4} maxLength={600} value={editDescription} onChange={(event) => setEditDescription(event.target.value)} placeholder="Необязательное пояснение" /></label>
               <div className="life-color-field"><span>Цвет</span><div>{colorOptions.map((color) => <button type="button" key={color} className={editColor === color ? "selected" : ""} style={{ "--area-color": color } as React.CSSProperties} onClick={() => setEditColor(color)} aria-label={`Выбрать цвет ${color}`}><i /></button>)}</div></div>
+              <section className="life-navigation-settings" aria-label="Положение сферы в навигации">
+                <div>
+                  <strong>Навигационная панель</strong>
+                  <small>Сфера всегда остаётся в полном выезжающем меню. Здесь настраивается верхняя строка и порядок.</small>
+                </div>
+                <label className="life-navigation-toggle">
+                  <input
+                    type="checkbox"
+                    checked={selected.showInTopNavigation !== false}
+                    onChange={(event) => updateLifeArea(selected.id, { showInTopNavigation: event.target.checked })}
+                  />
+                  <span><strong>Показывать сверху</strong><small>Быстрый доступ рядом с Главной и GTD</small></span>
+                </label>
+                <div className="life-navigation-order">
+                  <span>Положение среди сфер</span>
+                  <div>
+                    <button type="button" className="secondary-button" disabled={selected.archived || selectedActiveIndex <= 0} onClick={() => moveLifeArea(selected.id, "up")}><ArrowUp size={16} /> Левее</button>
+                    <button type="button" className="secondary-button" disabled={selected.archived || selectedActiveIndex < 0 || selectedActiveIndex >= activeAreas.length - 1} onClick={() => moveLifeArea(selected.id, "down")}>Правее <ArrowDown size={16} /></button>
+                  </div>
+                </div>
+              </section>
               <button className="primary-button" type="submit"><Check size={16} /> Сохранить</button>
               {message ? <p className="life-form-message" role="status">{message}</p> : null}
             </form>

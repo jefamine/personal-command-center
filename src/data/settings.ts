@@ -18,6 +18,7 @@ export function createDefaultSettings(): AppSettings {
     density: "comfortable",
     cornerStyle: "rounded",
     fontScale: "normal",
-    sidebarCollapsed: false
+    sidebarCollapsed: true,
+    lifeAreaTemplatesVersion: 1
   };
 }

@@ -33,6 +33,7 @@ import { buildDailyPlan, planLoadMinutes } from "../lib/planner";
 import { loadWeather, weatherLabel, type WeatherSnapshot } from "../lib/weather";
 import { sizeForColumns } from "../lib/widgetLayout";
 import { useDashboard } from "../state/DashboardContext";
+import { safeExternalUrl } from "../lib/url";
 import type { DashboardWidget, ViewId } from "../types";
 
 interface TodayViewProps {
@@ -95,7 +96,10 @@ function ReadingWidget({ widget }: { widget: DashboardWidget }) {
     <section className="panel dashboard-widget reading-widget">
       <div className="widget-heading"><div><span className="eyebrow">Ссылки, статьи и тексты</span><h2>{widget.title}</h2></div><button className="small-button" onClick={() => setAdding(!adding)}><Plus size={14} /> Добавить</button></div>
       {adding ? <div className="reading-add-form"><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Название" /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" /><button className="primary-button" onClick={add} disabled={!title.trim()}>Сохранить</button></div> : null}
-      {state.readingItems.length ? <div className="reading-list">{state.readingItems.slice(0, 6).map((item) => <article key={item.id}><div className="reading-mark"><BookOpen size={17} /></div><div><span>{item.source}</span><strong>{item.title}</strong>{item.summary ? <p>{item.summary}</p> : null}{item.body ? <details><summary>Читать здесь</summary><div>{item.body}</div></details> : null}</div>{item.url ? <a href={item.url} target="_blank" rel="noreferrer" aria-label={`Открыть ${item.title}`}><ExternalLink size={16} /></a> : null}<button className="icon-button subtle" onClick={() => removeReadingItem(item.id)} aria-label={`Удалить ${item.title}`}><Trash2 size={14} /></button></article>)}</div> : <div className="widget-inline-empty"><BookOpen size={24} /><span>Здесь появятся ваши материалы</span><small>Добавляйте ссылки сами или передавайте статьи через локальный мост Codex.</small></div>}
+      {state.readingItems.length ? <div className="reading-list">{state.readingItems.slice(0, 6).map((item) => {
+        const externalUrl = safeExternalUrl(item.url);
+        return <article key={item.id}><div className="reading-mark"><BookOpen size={17} /></div><div><span>{item.source}</span><strong>{item.title}</strong>{item.summary ? <p>{item.summary}</p> : null}{item.body ? <details><summary>Читать здесь</summary><div>{item.body}</div></details> : null}</div>{externalUrl ? <a href={externalUrl} target="_blank" rel="noreferrer" aria-label={`Открыть ${item.title}`}><ExternalLink size={16} /></a> : null}<button className="icon-button subtle" onClick={() => removeReadingItem(item.id)} aria-label={`Удалить ${item.title}`}><Trash2 size={14} /></button></article>;
+      })}</div> : <div className="widget-inline-empty"><BookOpen size={24} /><span>Здесь появятся ваши материалы</span><small>Добавляйте ссылки сами или передавайте статьи через локальный мост Codex.</small></div>}
     </section>
   );
 }

@@ -1,5 +1,10 @@
+import type { ObjectGraph } from "./domain/objects/objectGraph";
+
 export type ViewId =
   | "today"
+  | "gtd"
+  | "workspace"
+  | "sphere"
   | "life"
   | "inbox"
   | "tasks"
@@ -63,6 +68,23 @@ export interface Task {
   updatedAt: string;
 }
 
+/** Fields that may be changed without replacing a task's durable identity or provenance. */
+export type TaskUpdate = Partial<Pick<
+  Task,
+  | "title"
+  | "notes"
+  | "status"
+  | "projectId"
+  | "priority"
+  | "estimateMinutes"
+  | "energy"
+  | "context"
+  | "dueDate"
+  | "scheduledDate"
+  | "recurrence"
+  | "completedAt"
+>>;
+
 export interface Project {
   id: string;
   title: string;
@@ -83,6 +105,8 @@ export interface LifeArea {
   description: string;
   color: string;
   archived: boolean;
+  /** Show this sphere in the compact top navigation. It remains available in the full menu. */
+  showInTopNavigation: boolean;
   order: number;
   createdAt: string;
   updatedAt: string;
@@ -95,7 +119,7 @@ export interface LifeAreaDraft {
 }
 
 export type LifeAreaUpdate = Partial<
-  Pick<LifeArea, "title" | "description" | "color" | "archived">
+  Pick<LifeArea, "title" | "description" | "color" | "archived" | "showInTopNavigation">
 >;
 
 export interface CalendarEvent {
@@ -310,6 +334,8 @@ export interface AppSettings {
   cornerStyle: CornerStyle;
   fontScale: FontScale;
   sidebarCollapsed: boolean;
+  /** Internal marker: prevents deleted starter spheres from being restored on every launch. */
+  lifeAreaTemplatesVersion: number;
 }
 
 export interface DashboardWidgetConfig {
@@ -391,7 +417,11 @@ export interface ActivityEntry {
     | "life_area_created"
     | "life_area_updated"
     | "life_area_removed"
-    | "project_area_changed";
+    | "project_area_changed"
+    | "object_created"
+    | "object_updated"
+    | "object_relation_added"
+    | "object_relation_removed";
   entityId: string | null;
   timestamp: string;
   metadata: Record<string, string | number | boolean | null>;
@@ -452,7 +482,7 @@ export interface IntegrationSettings {
 }
 
 export interface DashboardState {
-  version: 12;
+  version: 13;
   tasks: Task[];
   projects: Project[];
   lifeAreas: LifeArea[];
@@ -466,12 +496,27 @@ export interface DashboardState {
   widgets: DashboardWidget[];
   readingItems: ReadingItem[];
   activityLog: ActivityEntry[];
+  /** Native universal objects and edges. Legacy arrays remain canonical during the transition. */
+  objectGraph: ObjectGraph;
   updatedAt: string;
 }
 
 export type CodexCommand =
-  | { id: string; type: "add_task"; payload: TaskDraft }
-  | { id: string; type: "update_task"; entityId: string; payload: Partial<Task> }
+  | {
+      id: string;
+      type: "add_task";
+      payload: Omit<TaskDraft, "status" | "generatedFromTaskId"> & {
+        status?: Exclude<TaskStatus, "done">;
+      };
+    }
+  | {
+      id: string;
+      type: "update_task";
+      entityId: string;
+      payload: Omit<TaskUpdate, "status" | "completedAt"> & {
+        status?: Exclude<TaskStatus, "done">;
+      };
+    }
   | { id: string; type: "complete_task"; entityId: string }
   | { id: string; type: "add_note"; payload: NoteDraft }
   | { id: string; type: "update_note"; entityId: string; payload: NoteUpdate }

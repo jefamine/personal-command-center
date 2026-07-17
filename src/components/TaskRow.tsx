@@ -1,6 +1,8 @@
 import { CalendarClock, Circle, CircleCheck, Clock3, MoreHorizontal, Repeat2 } from "lucide-react";
+import { legacyObjectReference } from "../domain/objects/legacyAdapter";
 import { formatDateHuman } from "../lib/date";
 import type { Project, Task } from "../types";
+import { AppLink } from "./AppLink";
 
 interface TaskRowProps {
   task: Task;
@@ -27,7 +29,13 @@ export function TaskRow({ task, project, compact = false, onToggle, onEdit, trai
       </button>
       <div className="task-content">
         <div className="task-title-line">
-          <strong>{task.title}</strong>
+          <AppLink
+            className="task-object-link"
+            route={{ kind: "object", objectId: legacyObjectReference("task", task.id) }}
+            navigation={{ label: task.title, preserveTrail: true }}
+          >
+            <strong>{task.title}</strong>
+          </AppLink>
           {task.priority >= 3 ? (
             <span className={`priority-dot p${task.priority}`} title={priorityLabels[task.priority]} />
           ) : null}

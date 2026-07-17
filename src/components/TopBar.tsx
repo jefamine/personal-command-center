@@ -1,15 +1,12 @@
 import {
   BarChart3,
   BookOpenText,
-  CalendarDays,
-  CheckSquare2,
   ChevronDown,
-  ClipboardCheck,
   CloudOff,
   Compass,
-  FolderKanban,
   Inbox,
   LayoutDashboard,
+  ListTodo,
   Menu,
   NotebookPen,
   Plus,
@@ -18,49 +15,95 @@ import {
   Sparkles,
   Unplug
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { parseQuickCapture } from "../lib/quickCapture";
+import { routeEquals } from "../navigation/router";
+import type { AppRoute } from "../navigation/types";
 import { useDashboard } from "../state/DashboardContext";
-import type { ViewId } from "../types";
+import type { LifeArea } from "../types";
+import { AppLink } from "./AppLink";
 
 interface TopBarProps {
-  activeView: ViewId;
+  route: AppRoute;
+  lifeAreas: LifeArea[];
   inboxCount: number;
+  menuOpen: boolean;
   onMenu: () => void;
   onSearch: () => void;
-  onSelect: (view: ViewId) => void;
 }
 
-const primaryItems: Array<{ id: ViewId; label: string; icon: typeof LayoutDashboard }> = [
-  { id: "today", label: "Сегодня", icon: LayoutDashboard },
-  { id: "life", label: "Сферы жизни", icon: Compass },
-  { id: "tasks", label: "Задачи", icon: CheckSquare2 },
-  { id: "calendar", label: "Время", icon: CalendarDays },
-  { id: "projects", label: "Проекты", icon: FolderKanban },
-  { id: "journal", label: "Дневник", icon: BookOpenText }
-];
+const secondaryItems = [
+  {
+    route: { kind: "tool", tool: "workspace" },
+    label: "Рабочее пространство",
+    description: "Документы, материалы и связи",
+    icon: NotebookPen
+  },
+  {
+    route: { kind: "tool", tool: "sphere-manager" },
+    label: "Сферы и верхняя панель",
+    description: "Состав, порядок и быстрый доступ",
+    icon: Compass
+  },
+  {
+    route: { kind: "tool", tool: "reflections" },
+    label: "Осмысление",
+    description: "Записи, вопросы и наблюдения",
+    icon: BookOpenText
+  },
+  {
+    route: { kind: "tool", tool: "insights" },
+    label: "Аналитика",
+    description: "Ритм, нагрузка и закономерности",
+    icon: BarChart3
+  },
+  {
+    route: { kind: "tool", tool: "integrations" },
+    label: "Интеграции",
+    description: "Календари, Obsidian и внешние сервисы",
+    icon: Unplug
+  },
+  {
+    route: { kind: "tool", tool: "settings" },
+    label: "Настройки",
+    description: "Вид и поведение системы",
+    icon: Settings
+  }
+] satisfies Array<{
+  route: Extract<AppRoute, { kind: "tool" }>;
+  label: string;
+  description: string;
+  icon: typeof LayoutDashboard;
+}>;
 
-const secondaryItems: Array<{ id: ViewId; label: string; description: string; icon: typeof LayoutDashboard }> = [
-  { id: "inbox", label: "Входящие", description: "Неразобранное", icon: Inbox },
-  { id: "notes", label: "Заметки", description: "Знания и Obsidian", icon: NotebookPen },
-  { id: "review", label: "Обзор", description: "Еженедельная ясность", icon: ClipboardCheck },
-  { id: "insights", label: "Аналитика", description: "Ритм и нагрузка", icon: BarChart3 },
-  { id: "integrations", label: "Интеграции", description: "Google, Obsidian, Codex", icon: Unplug },
-  { id: "settings", label: "Настройки", description: "Вид и поведение", icon: Settings }
-];
+function isGtdRoute(route: AppRoute): boolean {
+  return route.kind === "gtd";
+}
 
-export function TopBar({ activeView, inboxCount, onMenu, onSearch, onSelect }: TopBarProps) {
+function isSphereRoute(route: AppRoute, sphereId: string): boolean {
+  return route.kind === "sphere" && route.sphereId === sphereId;
+}
+
+export function TopBar({ route, lifeAreas, inboxCount, menuOpen, onMenu, onSearch }: TopBarProps) {
   const { addTask, saving, state } = useDashboard();
   const [title, setTitle] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
+  const visibleAreas = useMemo(
+    () => lifeAreas
+      .filter((area) => !area.archived && area.showInTopNavigation !== false)
+      .sort((left, right) => left.order - right.order),
+    [lifeAreas]
+  );
 
   useEffect(() => {
     if (!moreOpen) return;
     const close = (event: MouseEvent) => {
       if (!moreRef.current?.contains(event.target as Node)) setMoreOpen(false);
     };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMoreOpen(false); };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMoreOpen(false);
+    };
     window.addEventListener("mousedown", close);
     window.addEventListener("keydown", escape);
     return () => {
@@ -76,59 +119,98 @@ export function TopBar({ activeView, inboxCount, onMenu, onSearch, onSelect }: T
     setTitle("");
   };
 
-  const select = (view: ViewId) => {
-    onSelect(view);
-    setMoreOpen(false);
-  };
-
-  const secondaryActive = secondaryItems.some((item) => item.id === activeView);
+  const secondaryActive = secondaryItems.some((item) => routeEquals(route, item.route));
+  const gtdRoute: AppRoute = route.kind === "gtd" ? route : { kind: "gtd", section: "tasks" };
 
   return (
     <header className="topbar-shell">
       <div className="topbar-navigation-row">
-        <button className="icon-button menu-button" onClick={onMenu} aria-label="Открыть всё меню">
+        <button
+          className="icon-button menu-button"
+          type="button"
+          onClick={onMenu}
+          aria-label="Открыть всё меню"
+          aria-controls="app-navigation-drawer"
+          aria-expanded={menuOpen}
+          aria-haspopup="dialog"
+        >
           <Menu size={21} />
         </button>
 
-        <button type="button" className="topbar-brand" onClick={() => select("today")} aria-label="На главный экран">
+        <AppLink className="topbar-brand" route={{ kind: "home" }} aria-label="На главный экран">
           <span><Sparkles size={18} /></span>
           <strong>Центр</strong>
-        </button>
+        </AppLink>
 
-        <nav className="top-primary-nav" aria-label="Основные разделы">
-          {primaryItems.map((item) => {
-            const Icon = item.icon;
+        <nav className="top-primary-nav" aria-label="Основные пространства">
+          <AppLink
+            className={`topbar-more-button top-primary-link ${route.kind === "home" ? "active" : ""}`}
+            route={{ kind: "home" }}
+            aria-current={route.kind === "home" ? "page" : undefined}
+          >
+            <LayoutDashboard size={17} />
+            <span>Главная</span>
+          </AppLink>
+          <AppLink
+            className={`topbar-more-button top-primary-link ${isGtdRoute(route) ? "active" : ""}`}
+            route={gtdRoute}
+            aria-current={isGtdRoute(route) ? "page" : undefined}
+          >
+            <ListTodo size={17} />
+            <span>GTD</span>
+            {inboxCount > 0 ? <i title={`${inboxCount} во Входящих`}>{inboxCount}</i> : null}
+          </AppLink>
+          {visibleAreas.map((area) => {
+            const active = isSphereRoute(route, area.id);
             return (
-              <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => select(item.id)}>
-                <Icon size={17} />
-                <span>{item.label}</span>
-              </button>
+              <AppLink
+                key={area.id}
+                className={`topbar-more-button top-primary-link ${active ? "active" : ""}`}
+                route={{ kind: "sphere", sphereId: area.id }}
+                navigation={{ label: area.title }}
+                aria-current={active ? "page" : undefined}
+              >
+                <Compass size={17} style={{ color: active ? area.color : undefined }} />
+                <span>{area.title}</span>
+              </AppLink>
             );
           })}
         </nav>
 
         <div className="topbar-more" ref={moreRef}>
-          <button type="button" className={`topbar-more-button ${secondaryActive ? "active" : ""}`} aria-expanded={moreOpen} onClick={() => setMoreOpen((value) => !value)}>
+          <button
+            type="button"
+            className={`topbar-more-button ${secondaryActive ? "active" : ""}`}
+            aria-expanded={moreOpen}
+            aria-haspopup="menu"
+            onClick={() => setMoreOpen((value) => !value)}
+          >
             Ещё <ChevronDown size={15} />
-            {inboxCount ? <i>{inboxCount}</i> : null}
           </button>
           {moreOpen ? (
-            <div className="topbar-more-menu" role="menu">
+            <div className="topbar-more-menu" role="menu" aria-label="Системные инструменты">
               {secondaryItems.map((item) => {
                 const Icon = item.icon;
+                const active = routeEquals(route, item.route);
                 return (
-                  <button key={item.id} type="button" className={activeView === item.id ? "active" : ""} onClick={() => select(item.id)} role="menuitem">
+                  <AppLink
+                    key={item.route.tool}
+                    className={`nav-item topbar-secondary-link ${active ? "active" : ""}`}
+                    route={item.route}
+                    onClick={() => setMoreOpen(false)}
+                    role="menuitem"
+                    aria-current={active ? "page" : undefined}
+                  >
                     <span><Icon size={18} /></span>
                     <div><strong>{item.label}</strong><small>{item.description}</small></div>
-                    {item.id === "inbox" && inboxCount ? <i>{inboxCount}</i> : null}
-                  </button>
+                  </AppLink>
                 );
               })}
             </div>
           ) : null}
         </div>
 
-        <button className="icon-button top-search-button" onClick={onSearch} aria-label="Поиск по задачам">
+        <button className="icon-button top-search-button" type="button" onClick={onSearch} aria-label="Поиск по системе">
           <Search size={19} />
         </button>
       </div>
@@ -139,7 +221,7 @@ export function TopBar({ activeView, inboxCount, onMenu, onSearch, onSelect }: T
           <input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
-            placeholder="Быстро добавить задачу: завтра 30 мин @дом !!"
+            placeholder="Во Входящие GTD: завтра 30 мин @дом !!"
             aria-label="Быстро добавить задачу"
           />
           <kbd>Enter</kbd>
