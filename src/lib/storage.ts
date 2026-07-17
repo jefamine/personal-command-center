@@ -654,6 +654,15 @@ function normalizeWidgets(
   disableLegacyRecommendations: boolean
 ): DashboardWidget[] {
   const normalized = (widgets ?? createDefaultWidgets())
+    .map((widget) =>
+      widget.type === "reflection"
+        ? {
+            ...widget,
+            type: "document" as const,
+            title: widget.title === "Записать и осмыслить" ? "Текст" : widget.title
+          }
+        : widget
+    )
     .map(normalizeWidgetLayout)
     .sort((left, right) => left.order - right.order)
     .map((widget) =>
@@ -662,16 +671,16 @@ function normalizeWidgets(
         : widget
     );
 
-  if (!normalized.some((widget) => widget.type === "reflection")) {
-    const reflection = createDefaultWidgets().find((widget) => widget.type === "reflection");
-    if (reflection) {
+  if (!normalized.some((widget) => widget.type === "document")) {
+    const document = createDefaultWidgets().find((widget) => widget.type === "document");
+    if (document) {
       const recommendationIndex = normalized.findIndex(
         (widget) => widget.type === "recommendations"
       );
       normalized.splice(
         recommendationIndex >= 0 ? recommendationIndex : Math.min(2, normalized.length),
         0,
-        reflection
+        document
       );
     }
   }
@@ -981,7 +990,10 @@ export function migrateState(candidate: MigrationCandidate): DashboardState {
     if (!isRecord(candidate) || !hasValidV15CanonicalData(candidate)) {
       throw new Error("Локальные данные v15 повреждены: автосохранение остановлено.");
     }
-    return candidate as DashboardState;
+    return {
+      ...(candidate as DashboardState),
+      widgets: normalizeWidgets((candidate as DashboardState).widgets, false)
+    };
   }
   return upgradeV14ToV15(
     migrateToV14(candidate as DashboardStateV14 | LegacyDashboardState)
@@ -1568,7 +1580,7 @@ function isValidIntegrations(value: unknown): boolean {
     isNullableDateString(codex.lastCommandImportAt);
 }
 
-const widgetTypes = ["overview", "focus", "reflection", "plan", "inbox", "weather", "recommendations", "reading", "custom"];
+const widgetTypes = ["overview", "focus", "document", "reflection", "plan", "inbox", "weather", "recommendations", "reading", "custom"];
 const widgetSizes = ["full", "two-thirds", "half", "third"];
 const widgetVariants = ["note", "link", "image", "metric", "file", "api"];
 const widgetConfigStringKeys = new Set([

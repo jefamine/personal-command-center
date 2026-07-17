@@ -56,7 +56,7 @@ export function NotesView({ initialNoteId = null }: NotesViewProps) {
   return (
     <div className="page notes-page">
       <section className="page-heading notes-heading">
-        <div><span className="eyebrow">Знания рядом с действиями</span><h1>Заметки</h1><p>Обычный Markdown, проекты и шаблоны. Записи из «Записать и осмыслить» появляются здесь автоматически и входят в экспорт Obsidian.</p></div>
+        <div><span className="eyebrow">Знания рядом с действиями</span><h1>Заметки</h1><p>Обычные документы, проекты и шаблоны. Текст из виджета на Главной сохраняется здесь и входит в экспорт Obsidian.</p></div>
         <button className="primary-button" onClick={() => create()}><FilePlus2 size={18} /> Новая заметка</button>
       </section>
 
@@ -69,7 +69,7 @@ export function NotesView({ initialNoteId = null }: NotesViewProps) {
               return (
                 <button key={note.id} className={`note-list-item ${selected?.id === note.id ? "active" : ""}`} onClick={() => setSelectedId(note.id)}>
                   <div><FileText size={16} />{note.pinned ? <Pin size={12} className="pin-mark" /> : null}</div>
-                  <span><strong>{note.title}</strong><small>{note.origin === "reflection" ? "Дневник · готово для Obsidian" : project?.title ?? note.tags[0] ?? "Без проекта"}</small></span>
+                  <span><strong>{note.title}</strong><small>{project?.title ?? note.tags[0] ?? "Без проекта"}</small></span>
                 </button>
               );
             })}

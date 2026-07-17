@@ -19,23 +19,23 @@ describe("dashboard widget grid", () => {
     expect(normalized.gridHeight).toBe(5);
   });
 
-  it("даёт блоку осмысления место рядом с погодой", () => {
-    const reflection = normalizeWidgetLayout({
+  it("даёт текстовому документу место рядом с погодой", () => {
+    const document = normalizeWidgetLayout({
       ...widget,
-      id: "reflection",
-      type: "reflection",
-      title: "Записать и осмыслить",
+      id: "document",
+      type: "document",
+      title: "Текст",
       size: "two-thirds"
     });
-    expect(reflection.gridWidth).toBe(8);
-    expect(reflection.gridHeight).toBe(5);
+    expect(document.gridWidth).toBe(8);
+    expect(document.gridHeight).toBe(5);
   });
 
   it("ограничивает ручное растягивание сеткой", () => {
     expect(widgetGridWidth({ ...widget, gridWidth: 30 })).toBe(12);
     expect(widgetGridWidth({ ...widget, gridWidth: 1 })).toBe(3);
-    expect(widgetGridWidth({ ...widget, id: "reflection", type: "reflection", gridWidth: 3 })).toBe(6);
-    expect(widgetMinGridWidth({ type: "reflection" })).toBe(6);
+    expect(widgetGridWidth({ ...widget, id: "document", type: "document", gridWidth: 3 })).toBe(5);
+    expect(widgetMinGridWidth({ type: "document" })).toBe(5);
     expect(widgetGridHeight({ ...widget, gridHeight: 40 })).toBe(14);
     expect(sizeForColumns(8)).toBe("two-thirds");
   });

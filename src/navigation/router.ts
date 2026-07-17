@@ -40,7 +40,10 @@ export function routeFromUrl(url: URL): AppRoute {
 
   const tool = url.searchParams.get("tool");
   if (tool && systemTools.includes(tool as SystemTool)) {
-    return { kind: "tool", tool: tool as SystemTool };
+    const documentId = tool === "workspace"
+      ? url.searchParams.get("document") ?? undefined
+      : undefined;
+    return { kind: "tool", tool: tool as SystemTool, ...(documentId ? { documentId } : {}) };
   }
 
   const space = url.searchParams.get("space");
@@ -68,7 +71,7 @@ export function routeFromUrl(url: URL): AppRoute {
 
 export function routeToUrl(route: AppRoute, current: URL): URL {
   const url = new URL(current.toString());
-  ["view", "space", "section", "sphere", "tool", "object"].forEach((key) => url.searchParams.delete(key));
+  ["view", "space", "section", "sphere", "tool", "object", "document"].forEach((key) => url.searchParams.delete(key));
   if (route.kind === "gtd") {
     url.searchParams.set("space", "gtd");
     url.searchParams.set("section", route.section);
@@ -76,6 +79,9 @@ export function routeToUrl(route: AppRoute, current: URL): URL {
     url.searchParams.set("sphere", route.sphereId);
   } else if (route.kind === "tool") {
     url.searchParams.set("tool", route.tool);
+    if (route.tool === "workspace" && route.documentId) {
+      url.searchParams.set("document", route.documentId);
+    }
   } else if (route.kind === "object") {
     url.searchParams.set("object", route.objectId);
   }
@@ -92,9 +98,23 @@ export function routeEquals(left: AppRoute, right: AppRoute): boolean {
   if (left.kind === "home") return true;
   if (left.kind === "gtd" && right.kind === "gtd") return left.section === right.section;
   if (left.kind === "sphere" && right.kind === "sphere") return left.sphereId === right.sphereId;
-  if (left.kind === "tool" && right.kind === "tool") return left.tool === right.tool;
+  if (left.kind === "tool" && right.kind === "tool") {
+    return left.tool === right.tool && left.documentId === right.documentId;
+  }
   if (left.kind === "object" && right.kind === "object") return left.objectId === right.objectId;
   return false;
+}
+
+export function routeIsActive(current: AppRoute, navigationTarget: AppRoute): boolean {
+  if (
+    current.kind === "tool" &&
+    navigationTarget.kind === "tool" &&
+    current.tool === "workspace" &&
+    navigationTarget.tool === "workspace"
+  ) {
+    return navigationTarget.documentId === undefined || current.documentId === navigationTarget.documentId;
+  }
+  return routeEquals(current, navigationTarget);
 }
 
 export function routeLabel(route: AppRoute): string {

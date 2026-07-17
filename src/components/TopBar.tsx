@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { parseQuickCapture } from "../lib/quickCapture";
-import { routeEquals } from "../navigation/router";
+import { routeIsActive } from "../navigation/router";
 import type { AppRoute } from "../navigation/types";
 import { useDashboard } from "../state/DashboardContext";
 import type { LifeArea } from "../types";
@@ -119,7 +119,7 @@ export function TopBar({ route, lifeAreas, inboxCount, menuOpen, onMenu, onSearc
     setTitle("");
   };
 
-  const secondaryActive = secondaryItems.some((item) => routeEquals(route, item.route));
+  const secondaryActive = secondaryItems.some((item) => routeIsActive(route, item.route));
   const gtdRoute: AppRoute = route.kind === "gtd" ? route : { kind: "gtd", section: "tasks" };
 
   return (
@@ -191,7 +191,7 @@ export function TopBar({ route, lifeAreas, inboxCount, menuOpen, onMenu, onSearc
             <div className="topbar-more-menu" role="menu" aria-label="Системные инструменты">
               {secondaryItems.map((item) => {
                 const Icon = item.icon;
-                const active = routeEquals(route, item.route);
+                const active = routeIsActive(route, item.route);
                 return (
                   <AppLink
                     key={item.route.tool}

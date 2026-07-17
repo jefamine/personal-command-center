@@ -39,6 +39,8 @@ export type FontScale = "normal" | "large" | "xlarge";
 export type DashboardWidgetType =
   | "overview"
   | "focus"
+  | "document"
+  /** @deprecated Compatibility alias migrated to "document" on load. */
   | "reflection"
   | "plan"
   | "inbox"

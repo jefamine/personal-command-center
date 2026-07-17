@@ -639,7 +639,7 @@ export function ReflectionArchiveDrawer({
                 <div className="reflection-archive-empty">
                   <NotebookPen size={25} />
                   <strong>{reflections.length ? "Ничего не найдено" : "Здесь появятся ваши документы"}</strong>
-                  <p>{reflections.length ? "Попробуйте изменить запрос или фильтр." : "Сохраните первую мысль в виджете «Записать и осмыслить»."}</p>
+                  <p>{reflections.length ? "Попробуйте изменить запрос или фильтр." : "Добавьте обычному документу тег «осмысление», когда захотите разобрать его глубже."}</p>
                 </div>
               )}
             </section>

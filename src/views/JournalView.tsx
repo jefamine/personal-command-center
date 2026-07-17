@@ -3,6 +3,7 @@ import {
   Bot,
   CheckCircle2,
   FileCheck2,
+  FilePlus2,
   Search,
   ShieldCheck,
   Sparkles,
@@ -16,12 +17,13 @@ import type { DashboardWidget, ReflectionDocument } from "../types";
 
 interface JournalViewProps {
   onOpenNote: (noteId: string) => void;
+  onOpenWorkspace: () => void;
 }
 
-const journalWidget: DashboardWidget = {
-  id: "journal-main-composer",
-  type: "reflection",
-  title: "Новый документ",
+const assistantWidget: DashboardWidget = {
+  id: "document-assistant",
+  type: "document",
+  title: "Помощник для документа",
   enabled: true,
   size: "full",
   gridWidth: 12,
@@ -51,7 +53,7 @@ function reflectionStatus(entry: ReflectionDocument) {
   return "Сохранён";
 }
 
-export function JournalView({ onOpenNote }: JournalViewProps) {
+export function JournalView({ onOpenNote, onOpenWorkspace }: JournalViewProps) {
   const {
     state,
     removeReflection,
@@ -63,14 +65,19 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
   );
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(entries[0]?.id ?? null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const selected = entries.find((entry) => entry.id === selectedId) ?? entries[0] ?? null;
 
   useEffect(() => {
     if (!entries.length) {
       setSelectedId(null);
+      setAssistantOpen(false);
       return;
     }
-    if (!selectedId || !entries.some((entry) => entry.id === selectedId)) setSelectedId(entries[0].id);
+    if (!selectedId || !entries.some((entry) => entry.id === selectedId)) {
+      setSelectedId(entries[0].id);
+      setAssistantOpen(false);
+    }
   }, [entries, selectedId]);
 
   const filtered = useMemo(() => {
@@ -104,6 +111,9 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
           <span><strong>{entries.length}</strong><small>документов</small></span>
           <span><strong>{entries.filter((entry) => entry.reflection.analysis).length}</strong><small>разобрано</small></span>
         </div>
+        <button type="button" className="primary-button" onClick={onOpenWorkspace}>
+          <FilePlus2 size={17} /> Новый документ
+        </button>
       </section>
 
       <section className={`panel journal-ai-card ${journalShared ? "is-enabled" : ""}`}>
@@ -122,8 +132,6 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
         </button>
       </section>
 
-      <ReflectionWidget widget={journalWidget} startInCompose />
-
       <section className="journal-history-section">
         <div className="journal-section-heading">
           <div><span className="eyebrow">Вся хронология</span><h2>Сохранённые документы</h2></div>
@@ -131,10 +139,11 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
         </div>
 
         {entries.length ? (
+          <>
           <div className="journal-workspace">
             <aside className="panel journal-timeline" aria-label="Документы осмысления">
               {filtered.map((entry) => (
-                <button key={entry.id} type="button" className={selected?.id === entry.id ? "active" : ""} onClick={() => setSelectedId(entry.id)}>
+                <button key={entry.id} type="button" className={selected?.id === entry.id ? "active" : ""} onClick={() => { setSelectedId(entry.id); setAssistantOpen(false); }}>
                   <span className="journal-timeline-dot" />
                   <div><time>{formatJournalDate(entry.createdAt)}</time><strong>{entry.body}</strong><small>{reflectionStatus(entry)}</small></div>
                 </button>
@@ -148,6 +157,7 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
                   <header>
                     <div><span className={`journal-status is-${selected.reflection.status}`}><CheckCircle2 size={14} /> {reflectionStatus(selected)}</span><time>{formatJournalDate(selected.createdAt)}</time></div>
                     <div className="journal-entry-actions">
+                      <button type="button" className="secondary-button" onClick={() => setAssistantOpen((value) => !value)}><Bot size={16} /> {assistantOpen ? "Скрыть ИИ" : "ИИ-действия"}</button>
                       <button type="button" className="secondary-button" onClick={openNote}><FileCheck2 size={16} /> Открыть документ</button>
                       <button type="button" className="icon-button danger-icon-button" onClick={removeSelected} aria-label="Удалить документ"><Trash2 size={17} /></button>
                     </div>
@@ -164,14 +174,25 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
                       {selected.reflection.correction ? <blockquote><strong>Ваша поправка</strong>{selected.reflection.correction}</blockquote> : null}
                     </section>
                   ) : (
-                    <section className="journal-analysis-empty"><Sparkles size={18} /><span><strong>Этот документ ещё не разобран</strong><small>Откройте его в блоке выше или на главном экране и выберите «Разобрать».</small></span></section>
+                    <section className="journal-analysis-empty"><Sparkles size={18} /><span><strong>Этот документ ещё не разобран</strong><small>Откройте ИИ-действия: разбор будет привязан к этому обычному документу.</small></span></section>
                   )}
                 </>
               ) : null}
             </article>
           </div>
+          {assistantOpen && selected ? (
+            <div className="journal-document-assistant">
+              <ReflectionWidget
+                widget={assistantWidget}
+                documentId={selected.id}
+                allowDocumentCreation={false}
+                showArchiveButton={false}
+              />
+            </div>
+          ) : null}
+          </>
         ) : (
-          <section className="panel journal-empty"><BookOpenText size={28} /><h2>Первый документ начнёт хронологию</h2><p>Напишите выше то, что сейчас занимает вас. Система сохранит текст без разметки и оценки.</p></section>
+          <section className="panel journal-empty"><BookOpenText size={28} /><h2>В подборке пока пусто</h2><p>Создайте обычный документ в рабочем пространстве и добавьте тег «осмысление».</p><button type="button" className="primary-button" onClick={onOpenWorkspace}>Открыть рабочее пространство</button></section>
         )}
       </section>
     </div>

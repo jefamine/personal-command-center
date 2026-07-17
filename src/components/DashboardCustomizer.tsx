@@ -39,7 +39,7 @@ interface DashboardCustomizerProps {
 const widgetIcons: Record<StandardWidgetType, typeof LayoutDashboard> = {
   overview: LayoutDashboard,
   focus: Target,
-  reflection: NotebookPen,
+  document: NotebookPen,
   recommendations: Brain,
   weather: CloudSun,
   plan: ListTodo,
@@ -153,7 +153,7 @@ export function DashboardCustomizer({ open, onClose, onEditWidget, onCreateWidge
                   <GripVertical className="drag-hint" size={17} />
                   <div className="widget-manager-icon"><Icon size={18} /></div>
                   <div className="widget-manager-name"><input value={widget.title} onChange={(event) => update(widget.id, { title: event.target.value })} /><span>{item?.description ?? "Пользовательская карточка"}</span></div>
-                  <select value={widget.size} aria-label={`Размер: ${widget.title}`} onChange={(event) => { const size = event.target.value as DashboardWidgetSize; update(widget.id, { size, gridWidth: columnsForSize(size) }); }}><option value="full">На всю ширину</option><option value="two-thirds">Две трети</option><option value="half">Половина</option>{widget.type !== "reflection" ? <option value="third">Треть</option> : null}</select>
+                  <select value={widget.size} aria-label={`Размер: ${widget.title}`} onChange={(event) => { const size = event.target.value as DashboardWidgetSize; update(widget.id, { size, gridWidth: columnsForSize(size) }); }}><option value="full">На всю ширину</option><option value="two-thirds">Две трети</option><option value="half">Половина</option><option value="third">Треть</option></select>
                   <div className="widget-order-buttons"><button disabled={index === 0} onClick={() => move(widget.id, -1)} aria-label={`Поднять ${widget.title}`}><ArrowUp size={15} /></button><button disabled={index === widgets.length - 1} onClick={() => move(widget.id, 1)} aria-label={`Опустить ${widget.title}`}><ArrowDown size={15} /></button></div>
                   <Toggle checked={widget.enabled} label={`Показывать ${widget.title}`} onChange={() => update(widget.id, { enabled: !widget.enabled })} />
                   <button className="icon-button subtle" onClick={() => onEditWidget(widget.id)} aria-label={`Редактировать ${widget.title}`} title="Открыть редактор"><Pencil size={16} /></button>

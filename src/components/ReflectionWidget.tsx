@@ -61,6 +61,9 @@ interface ReflectionWidgetProps {
   widget: DashboardWidget;
   startInCompose?: boolean;
   onOpenJournal?: () => void;
+  documentId?: string;
+  allowDocumentCreation?: boolean;
+  showArchiveButton?: boolean;
 }
 
 type EditorMode = "compose" | "preview" | "correction";
@@ -132,7 +135,14 @@ function UsedMemoryDetails({ entry, memory, phase }: UsedMemoryDetailsProps) {
   );
 }
 
-export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal }: ReflectionWidgetProps) {
+export function ReflectionWidget({
+  widget,
+  startInCompose = false,
+  onOpenJournal,
+  documentId,
+  allowDocumentCreation = true,
+  showArchiveButton = true
+}: ReflectionWidgetProps) {
   const {
     state,
     addReflection,
@@ -146,12 +156,17 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
   const reflections = useMemo(() => reflectionDocuments(state.notes), [state.notes]);
   const memoryPickerId = `reflection-memory-picker-${widget.id}`;
   const latest = useMemo(
-    () => reflections.find((entry) => entry.reflection.status === "queued") ??
+    () => (documentId ? reflections.find((entry) => entry.id === documentId) : null) ??
+      reflections.find((entry) => entry.reflection.status === "queued") ??
       [...reflections].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
-    [reflections]
+    [documentId, reflections]
   );
-  const [activeId, setActiveId] = useState<string | null>(startInCompose ? null : latest?.id ?? null);
-  const [composing, setComposing] = useState(startInCompose || !latest);
+  const [activeId, setActiveId] = useState<string | null>(
+    startInCompose && allowDocumentCreation ? null : documentId ?? latest?.id ?? null
+  );
+  const [composing, setComposing] = useState(
+    allowDocumentCreation && (startInCompose || !latest)
+  );
   const [mode, setMode] = useState<EditorMode>("compose");
   const [draftText, setDraftText] = useState("");
   const [previewText, setPreviewText] = useState("");
@@ -222,6 +237,16 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
     () => reflections.find((entry) => entry.id === activeId) ?? (!composing ? latest : null),
     [activeId, composing, latest, reflections]
   );
+  const requestedDocumentAvailable = Boolean(
+    documentId && reflections.some((entry) => entry.id === documentId)
+  );
+
+  useEffect(() => {
+    if (!documentId || !requestedDocumentAvailable) return;
+    setActiveId(documentId);
+    setComposing(false);
+    setMode("compose");
+  }, [documentId, requestedDocumentAvailable]);
 
   useEffect(() => {
     if (validSelectedMemoryIds.length === selectedMemoryIds.length) return;
@@ -568,8 +593,8 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
           <h2>{widget.title}</h2>
         </div>
         <div className="reflection-header-actions">
-          <button type="button" className="reflection-new-button" onClick={() => setArchiveOpen(true)} aria-label="Открыть документы осмысления и память"><History size={17} /> Документы · {reflections.length}</button>
-          {active && active.reflection.status !== "queued" && !composing && mode === "compose" ? (
+          {showArchiveButton ? <button type="button" className="reflection-new-button" onClick={() => setArchiveOpen(true)} aria-label="Открыть документы осмысления и память"><History size={17} /> Документы · {reflections.length}</button> : null}
+          {allowDocumentCreation && active && active.reflection.status !== "queued" && !composing && mode === "compose" ? (
             <button type="button" className="reflection-new-button" onClick={beginNew} aria-label="Новая запись"><Plus size={17} /> Новая запись</button>
           ) : null}
         </div>
@@ -749,7 +774,7 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
             <button type="button" className="secondary-button" onClick={() => { setMode("compose"); setCorrection(""); }}>Отмена</button>
           </div>
         </div>
-      ) : composing || !active ? (
+      ) : allowDocumentCreation && (composing || !active) ? (
         <div className="reflection-composer">
           <label htmlFor={`reflection-input-${widget.id}`}>Что сейчас занимает вас?</label>
           <textarea
@@ -768,6 +793,11 @@ export function ReflectionWidget({ widget, startInCompose = false, onOpenJournal
             </div>
           </div>
           <small className="reflection-key-hint">Ctrl + Enter — посмотреть и отправить на разбор</small>
+        </div>
+      ) : !active ? (
+        <div className="reflection-saved">
+          <div className="reflection-state-icon"><PenLine size={23} /></div>
+          <div><strong>Документ недоступен</strong><p>Вернитесь к подборке и выберите существующий документ.</p></div>
         </div>
       ) : active.reflection.status === "queued" ? (
         <div className="reflection-queued">

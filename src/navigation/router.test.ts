@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ViewId } from "../types";
-import { legacyViewToRoute, routeEquals, routeFromUrl, routeToUrl } from "./router";
+import { legacyViewToRoute, routeEquals, routeFromUrl, routeIsActive, routeToUrl } from "./router";
 import type { AppRoute } from "./types";
 
 describe("маршруты ПСОЖ", () => {
@@ -24,6 +24,7 @@ describe("маршруты ПСОЖ", () => {
       { kind: "gtd", section: "inbox" },
       { kind: "sphere", sphereId: "семья/1" },
       { kind: "tool", tool: "workspace" },
+      { kind: "tool", tool: "workspace", documentId: "legacy:v12:note:мысль/1" },
       { kind: "object", objectId: "legacy:v12:task:42" }
     ];
     const base = new URL("https://local.test/app?unrelated=kept#section");
@@ -38,5 +39,16 @@ describe("маршруты ПСОЖ", () => {
     expect(routeFromUrl(new URL("https://local.test/?view=inbox")))
       .toEqual({ kind: "gtd", section: "inbox" });
   });
-});
 
+  it("оставляет рабочее пространство активным при открытом документе", () => {
+    const current: AppRoute = {
+      kind: "tool",
+      tool: "workspace",
+      documentId: "legacy:v12:note:one"
+    };
+    const navigationTarget: AppRoute = { kind: "tool", tool: "workspace" };
+
+    expect(routeIsActive(current, navigationTarget)).toBe(true);
+    expect(routeEquals(current, navigationTarget)).toBe(false);
+  });
+});

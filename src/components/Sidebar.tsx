@@ -14,7 +14,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, type RefObject } from "react";
-import { routeEquals } from "../navigation/router";
+import { routeIsActive } from "../navigation/router";
 import type { AppRoute } from "../navigation/types";
 import type { LifeArea } from "../types";
 import { AppLink } from "./AppLink";
@@ -237,7 +237,7 @@ export function Sidebar({
           <span className="nav-caption">Инструменты</span>
           {toolItems.map((item) => {
             const Icon = item.icon;
-            const active = routeEquals(route, item.route);
+            const active = routeIsActive(route, item.route);
             return (
               <AppLink
                 key={item.route.tool}
@@ -263,11 +263,11 @@ export function Sidebar({
             </div>
           </div>
           <AppLink
-            className={`nav-item ${routeEquals(route, settingsRoute) ? "active" : ""}`}
+            className={`nav-item ${routeIsActive(route, settingsRoute) ? "active" : ""}`}
             route={settingsRoute}
             onClick={onClose}
             title={collapsed ? "Настройки" : undefined}
-            aria-current={routeEquals(route, settingsRoute) ? "page" : undefined}
+            aria-current={routeIsActive(route, settingsRoute) ? "page" : undefined}
           >
             <Settings size={19} strokeWidth={1.9} />
             <span>Настройки</span>

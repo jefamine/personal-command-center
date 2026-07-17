@@ -11,7 +11,7 @@ export type AppRoute =
   | { kind: "home" }
   | { kind: "gtd"; section: GtdSection }
   | { kind: "sphere"; sphereId: string }
-  | { kind: "tool"; tool: SystemTool }
+  | { kind: "tool"; tool: SystemTool; documentId?: string }
   | { kind: "object"; objectId: string };
 
 export interface NavigationCrumb {
@@ -24,4 +24,3 @@ export interface NavigateOptions {
   preserveTrail?: boolean;
   trail?: NavigationCrumb[];
 }
-

@@ -79,6 +79,29 @@ describe("storage migration v15", () => {
     );
   });
 
+  it("converts the legacy reflection widget without changing its stable id", () => {
+    const state = createInitialState();
+    const documentWidget = state.widgets.find((widget) => widget.type === "document");
+    expect(documentWidget).toBeDefined();
+    state.widgets = state.widgets.map((widget) =>
+      widget.id === documentWidget!.id
+        ? {
+            ...widget,
+            id: "legacy-reflection-slot",
+            type: "reflection" as const,
+            title: "Записать и осмыслить"
+          }
+        : widget
+    );
+
+    const migrated = migrateState(state);
+    expect(migrated.widgets).toContainEqual(expect.objectContaining({
+      id: "legacy-reflection-slot",
+      type: "document",
+      title: "Текст"
+    }));
+  });
+
   it("creates current defaults from the first storage version", () => {
     const migrated = migrateState({
       version: 1,
@@ -102,7 +125,7 @@ describe("storage migration v15", () => {
     expect(reflectionDocuments(migrated.notes)).toEqual([]);
     expect(migrated.trash).toEqual([]);
     expect(migrated.revisionHistory).toEqual([]);
-    expect(migrated.widgets.some((widget) => widget.type === "reflection")).toBe(true);
+    expect(migrated.widgets.some((widget) => widget.type === "document")).toBe(true);
     expect(migrated.objectGraph).toEqual({ schemaVersion: 1, objects: [], relations: [] });
   });
 

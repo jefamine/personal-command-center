@@ -133,6 +133,10 @@ export default function App() {
           onOpenTasks={() => navigate({ kind: "gtd", section: "tasks" })}
           onEditTask={setEditingTaskId}
           onNavigate={navigateLegacy}
+          onOpenWorkspace={(documentId) => navigate(
+            { kind: "tool", tool: "workspace", ...(documentId ? { documentId } : {}) },
+            { preserveTrail: true, label: documentId ? "Документ" : "Рабочее пространство" }
+          )}
         />
       );
     }
@@ -142,14 +146,18 @@ export default function App() {
 
     switch (route.tool) {
       case "workspace":
-        return <WorkspaceView />;
+        return <WorkspaceView documentId={route.documentId} />;
       case "sphere-manager":
         return <LifeView onOpenProjects={() => navigate({ kind: "gtd", section: "projects" })} />;
       case "reflections":
         return (
           <JournalView
             onOpenNote={(noteId) => navigate(
-              { kind: "object", objectId: legacyObjectReference("note", noteId) },
+              { kind: "tool", tool: "workspace", documentId: legacyObjectReference("note", noteId) },
+              { preserveTrail: true }
+            )}
+            onOpenWorkspace={() => navigate(
+              { kind: "tool", tool: "workspace" },
               { preserveTrail: true }
             )}
           />

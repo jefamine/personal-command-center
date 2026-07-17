@@ -24,8 +24,8 @@ import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { DashboardCanvas } from "../components/DashboardCanvas";
 import { DashboardCustomizer } from "../components/DashboardCustomizer";
 import { CustomDashboardWidget } from "../components/CustomDashboardWidget";
+import { DocumentWidget } from "../components/DocumentWidget";
 import { EmptyState } from "../components/EmptyState";
-import { ReflectionWidget } from "../components/ReflectionWidget";
 import { TaskRow } from "../components/TaskRow";
 import { WidgetEditor } from "../components/WidgetEditor";
 import { formatTime, greetingForTime, localDateKey, todayLong } from "../lib/date";
@@ -41,6 +41,7 @@ interface TodayViewProps {
   onOpenTasks: () => void;
   onEditTask: (taskId: string) => void;
   onNavigate: (view: ViewId) => void;
+  onOpenWorkspace: (documentId?: string) => void;
 }
 
 function WeatherGlyph({ code, size = 28 }: { code: number; size?: number }) {
@@ -104,7 +105,7 @@ function ReadingWidget({ widget }: { widget: DashboardWidget }) {
   );
 }
 
-export function TodayView({ onOpenInbox, onOpenTasks, onEditTask, onNavigate }: TodayViewProps) {
+export function TodayView({ onOpenInbox, onOpenTasks, onEditTask, onNavigate, onOpenWorkspace }: TodayViewProps) {
   const { state, toggleTask, confirmPlan, updateWidgets } = useDashboard();
   const [customizing, setCustomizing] = useState(false);
   const [gridEditing, setGridEditing] = useState(false);
@@ -191,7 +192,9 @@ export function TodayView({ onOpenInbox, onOpenTasks, onEditTask, onNavigate }: 
     );
     if (widget.type === "weather") return <WeatherWidget widget={widget} />;
     if (widget.type === "reading") return <ReadingWidget widget={widget} />;
-    if (widget.type === "reflection") return <ReflectionWidget widget={widget} onOpenJournal={() => onNavigate("journal")} />;
+    if (widget.type === "document" || widget.type === "reflection") {
+      return <DocumentWidget widget={widget} onOpenWorkspace={onOpenWorkspace} />;
+    }
     if (widget.type === "recommendations") return (
       <section className="panel dashboard-widget recommendations-widget"><div className="widget-heading"><div><span className="eyebrow">Контекстная помощь</span><h2>{widget.title}</h2></div><Brain size={21} /></div><div className="recommendation-list">{recommendations.map((item) => { const Icon = item.icon; return <article key={item.title}><div><Icon size={18} /></div><span><strong>{item.title}</strong><p>{item.text}</p></span><button className="small-button" onClick={item.run}>{item.action} <ArrowRight size={13} /></button></article>; })}</div><small className="recommendation-note">Сейчас рекомендации рассчитываются локально. Журнал действий уже собирает основу для будущей персонализации.</small></section>
     );
