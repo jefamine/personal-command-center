@@ -31,6 +31,15 @@ import {
   type UniversalObjectDraft
 } from "../domain/objects/objectGraph";
 import { lifeAreaTitleKey } from "../domain/life/lifeAreas";
+import {
+  appendEntityRevision,
+  createEntityRevision,
+  eventTrashEntry,
+  noteTrashEntry,
+  objectTrashEntry,
+  reflectionTrashEntry,
+  taskTrashEntry
+} from "../domain/safety/dataSafety";
 import { createDefaultPersonalContext, normalizePersonalContext } from "../domain/profile/personalContext";
 import { createReflectionNote } from "../domain/reflections/reflectionNote";
 import { memoryReferencesFromProjection } from "../domain/reflections/reflectionMemory";
@@ -85,6 +94,7 @@ interface DashboardContextValue {
     expectedRevision: number,
     changes: Partial<Pick<UniversalObject, "title" | "roles" | "blocks" | "properties" | "status">>
   ) => void;
+  removeObject: (id: string) => void;
   addObjectRelation: (draft: ObjectRelationDraft) => ObjectRelation;
   removeObjectRelation: (relationId: string) => void;
   addTask: (draft: TaskDraft) => Task;
@@ -148,6 +158,11 @@ interface DashboardContextValue {
   updateWidgets: (widgets: DashboardWidget[]) => void;
   addReadingItem: (draft: ReadingItemDraft) => ReadingItem;
   removeReadingItem: (id: string) => void;
+  restoreTrashEntry: (id: string) => boolean;
+  purgeTrashEntry: (id: string) => void;
+  emptyTrash: () => void;
+  restoreRevision: (id: string) => boolean;
+  clearRevisionHistory: () => void;
   replaceState: (state: DashboardState) => void;
 }
 
@@ -395,14 +410,49 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       expectedRevision: number,
       changes: Partial<Pick<UniversalObject, "title" | "roles" | "blocks" | "properties" | "status">>
     ) => {
-      mutate((current) => ({
-        ...current,
-        objectGraph: patchUniversalObject(current.objectGraph, id, changes, {
-          expectedRevision,
-          now: new Date().toISOString()
-        }),
-        activityLog: withActivity(current, "object_updated", id)
-      }));
+      mutate((current) => {
+        const existing = current.objectGraph.objects.find((object) => object.id === id);
+        if (!existing) return current;
+        const now = new Date().toISOString();
+        return {
+          ...current,
+          objectGraph: patchUniversalObject(current.objectGraph, id, changes, {
+            expectedRevision,
+            now
+          }),
+          revisionHistory: appendEntityRevision(
+            current.revisionHistory,
+            createEntityRevision({ kind: "object", object: existing }, now)
+          ),
+          activityLog: withActivity(current, "object_updated", id)
+        };
+      });
+    },
+    [mutate]
+  );
+
+  const removeObject = useCallback(
+    (id: string) => {
+      mutate((current) => {
+        const object = current.objectGraph.objects.find((entry) => entry.id === id);
+        if (!object) return current;
+        const relations = current.objectGraph.relations.filter(
+          (relation) => relation.fromId === id || relation.toId === id
+        );
+        const trashed = objectTrashEntry(object, relations);
+        return {
+          ...current,
+          objectGraph: {
+            ...current.objectGraph,
+            objects: current.objectGraph.objects.filter((entry) => entry.id !== id),
+            relations: current.objectGraph.relations.filter(
+              (relation) => relation.fromId !== id && relation.toId !== id
+            )
+          },
+          trash: [trashed, ...current.trash],
+          activityLog: withActivity(current, "entity_trashed", id, { kind: "object" })
+        };
+      });
     },
     [mutate]
   );
@@ -502,6 +552,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
             event.taskId === id && updated.title !== existing.title
               ? { ...event, title: updated.title, updatedAt }
               : event
+          ),
+          revisionHistory: appendEntityRevision(
+            current.revisionHistory,
+            createEntityRevision({ kind: "task", task: existing }, updatedAt)
           )
         };
       });
@@ -526,6 +580,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
           return {
             ...current,
             activityLog,
+            revisionHistory: appendEntityRevision(
+              current.revisionHistory,
+              createEntityRevision({ kind: "task", task: existing }, now)
+            ),
             tasks: current.tasks
               .filter((task) => task.generatedFromTaskId !== id || task.status === "done")
               .map((task) =>
@@ -545,7 +603,15 @@ export function DashboardProvider({ children }: PropsWithChildren) {
           existing.recurrence === "none" ||
           current.tasks.some((task) => task.generatedFromTaskId === id)
         ) {
-          return { ...current, tasks: updatedTasks, activityLog };
+          return {
+            ...current,
+            tasks: updatedTasks,
+            activityLog,
+            revisionHistory: appendEntityRevision(
+              current.revisionHistory,
+              createEntityRevision({ kind: "task", task: existing }, now)
+            )
+          };
         }
 
         const anchor = existing.scheduledDate ?? existing.dueDate ?? localDateKey();
@@ -567,7 +633,15 @@ export function DashboardProvider({ children }: PropsWithChildren) {
           createdAt: now,
           updatedAt: now
         };
-        return { ...current, tasks: [generated, ...updatedTasks], activityLog };
+        return {
+          ...current,
+          tasks: [generated, ...updatedTasks],
+          activityLog,
+          revisionHistory: appendEntityRevision(
+            current.revisionHistory,
+            createEntityRevision({ kind: "task", task: existing }, now)
+          )
+        };
       });
     },
     [mutate]
@@ -575,11 +649,19 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const removeTask = useCallback(
     (id: string) => {
-      mutate((current) => ({
-        ...current,
-        tasks: current.tasks.filter((task) => task.id !== id),
-        events: current.events.filter((event) => event.taskId !== id)
-      }));
+      mutate((current) => {
+        const task = current.tasks.find((entry) => entry.id === id);
+        if (!task) return current;
+        const linkedEvents = current.events.filter((event) => event.taskId === id);
+        const trashed = taskTrashEntry(task, linkedEvents);
+        return {
+          ...current,
+          tasks: current.tasks.filter((entry) => entry.id !== id),
+          events: current.events.filter((event) => event.taskId !== id),
+          trash: [trashed, ...current.trash],
+          activityLog: withActivity(current, "entity_trashed", id, { kind: "task" })
+        };
+      });
     },
     [mutate]
   );
@@ -613,14 +695,20 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   const updateNote = useCallback(
     (id: string, changes: NoteUpdate) => {
       const updatedAt = new Date().toISOString();
-      mutate((current) => ({
-        ...current,
-        notes: current.notes.map((note) =>
-          note.id === id
-            ? applyNoteUpdate(note, changes, updatedAt)
-            : note
-        )
-      }));
+      mutate((current) => {
+        const existing = current.notes.find((note) => note.id === id);
+        if (!existing) return current;
+        const updated = applyNoteUpdate(existing, changes, updatedAt);
+        if (JSON.stringify(existing) === JSON.stringify(updated)) return current;
+        return {
+          ...current,
+          notes: current.notes.map((note) => note.id === id ? updated : note),
+          revisionHistory: appendEntityRevision(
+            current.revisionHistory,
+            createEntityRevision({ kind: "note", note: existing }, updatedAt)
+          )
+        };
+      });
     },
     [mutate]
   );
@@ -629,10 +717,13 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (id: string) => {
       mutate((current) => {
         if (!current.notes.some((note) => note.id === id)) return current;
+        const note = current.notes.find((entry) => entry.id === id)!;
         const now = new Date().toISOString();
+        const trashed = noteTrashEntry(note, now);
         return {
           ...current,
           notes: current.notes.filter((note) => note.id !== id),
+          trash: [trashed, ...current.trash],
           reflections: current.reflections.map((entry) =>
             entry.noteId === id && entry.suggestions.some((suggestion) => suggestion.addedToNoteAt)
               ? {
@@ -645,7 +736,8 @@ export function DashboardProvider({ children }: PropsWithChildren) {
                   updatedAt: now
                 }
               : entry
-          )
+          ),
+          activityLog: withActivity(current, "entity_trashed", id, { kind: "note" })
         };
       });
     },
@@ -1117,9 +1209,16 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (id: string) => {
       mutate((current) => {
         if (!current.reflections.some((entry) => entry.id === id)) return current;
+        const reflection = current.reflections.find((entry) => entry.id === id)!;
+        const linkedNote = reflection.noteId
+          ? current.notes.find((note) => note.id === reflection.noteId) ?? null
+          : null;
+        const trashed = reflectionTrashEntry(reflection, linkedNote);
         return {
           ...current,
-          reflections: current.reflections.filter((entry) => entry.id !== id)
+          reflections: current.reflections.filter((entry) => entry.id !== id),
+          trash: [trashed, ...current.trash],
+          activityLog: withActivity(current, "entity_trashed", id, { kind: "reflection" })
         };
       });
     },
@@ -1470,24 +1569,38 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const updateEvent = useCallback(
     (id: string, changes: Partial<CalendarEvent>) => {
-      mutate((current) => ({
-        ...current,
-        events: current.events.map((event) =>
-          event.id === id
-            ? { ...event, ...changes, id: event.id, updatedAt: new Date().toISOString() }
-            : event
-        )
-      }));
+      mutate((current) => {
+        const existing = current.events.find((event) => event.id === id);
+        if (!existing) return current;
+        const now = new Date().toISOString();
+        return {
+          ...current,
+          events: current.events.map((event) =>
+            event.id === id ? { ...event, ...changes, id: event.id, updatedAt: now } : event
+          ),
+          revisionHistory: appendEntityRevision(
+            current.revisionHistory,
+            createEntityRevision({ kind: "event", event: existing }, now)
+          )
+        };
+      });
     },
     [mutate]
   );
 
   const removeEvent = useCallback(
     (id: string) => {
-      mutate((current) => ({
-        ...current,
-        events: current.events.filter((event) => event.id !== id)
-      }));
+      mutate((current) => {
+        const event = current.events.find((entry) => entry.id === id);
+        if (!event) return current;
+        const trashed = eventTrashEntry(event);
+        return {
+          ...current,
+          events: current.events.filter((entry) => entry.id !== id),
+          trash: [trashed, ...current.trash],
+          activityLog: withActivity(current, "entity_trashed", id, { kind: "event" })
+        };
+      });
     },
     [mutate]
   );
@@ -1653,6 +1766,205 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     [mutate]
   );
 
+  const restoreTrashEntry = useCallback(
+    (id: string) => {
+      let restored = false;
+      mutate((current) => {
+        const entry = current.trash.find((candidate) => candidate.id === id);
+        if (!entry) return current;
+        const snapshot = entry.snapshot;
+        let next = current;
+
+        if (snapshot.kind === "task") {
+          if (current.tasks.some((task) => task.id === snapshot.task.id)) return current;
+          const eventIds = new Set(current.events.map((event) => event.id));
+          next = {
+            ...current,
+            tasks: [snapshot.task, ...current.tasks],
+            events: [
+              ...snapshot.linkedEvents.filter((event) => !eventIds.has(event.id)),
+              ...current.events
+            ]
+          };
+        } else if (snapshot.kind === "note") {
+          if (current.notes.some((note) => note.id === snapshot.note.id)) return current;
+          next = { ...current, notes: [snapshot.note, ...current.notes] };
+        } else if (snapshot.kind === "reflection") {
+          if (current.reflections.some((reflection) => reflection.id === snapshot.reflection.id)) return current;
+          const shouldRestoreNote = snapshot.linkedNote &&
+            !current.notes.some((note) => note.id === snapshot.linkedNote?.id);
+          next = {
+            ...current,
+            reflections: [snapshot.reflection, ...current.reflections],
+            notes: shouldRestoreNote && snapshot.linkedNote
+              ? [snapshot.linkedNote, ...current.notes]
+              : current.notes
+          };
+        } else if (snapshot.kind === "event") {
+          if (current.events.some((event) => event.id === snapshot.event.id)) return current;
+          next = { ...current, events: [snapshot.event, ...current.events] };
+        } else {
+          if (current.objectGraph.objects.some((object) => object.id === snapshot.object.id)) return current;
+          let objectGraph = addGraphObject(current.objectGraph, {
+            ...snapshot.object,
+            status: snapshot.object.status === "deleted" ? "active" : snapshot.object.status,
+            deletedAt: null
+          });
+          for (const relation of snapshot.relations) {
+            const ids = new Set(objectGraph.objects.map((object) => object.id));
+            if (!ids.has(relation.fromId) || !ids.has(relation.toId)) continue;
+            try {
+              objectGraph = addGraphRelation(objectGraph, relation, { now: relation.createdAt });
+            } catch {
+              // A relation can remain absent if its other endpoint was removed independently.
+            }
+          }
+          next = {
+            ...current,
+            objectGraph
+          };
+        }
+
+        restored = true;
+        return {
+          ...next,
+          trash: current.trash.filter((candidate) => candidate.id !== id),
+          activityLog: withActivity(current, "entity_restored", entry.entityId, {
+            kind: entry.entityKind
+          })
+        };
+      });
+      return restored;
+    },
+    [mutate]
+  );
+
+  const purgeTrashEntry = useCallback(
+    (id: string) => {
+      mutate((current) => {
+        const entry = current.trash.find((candidate) => candidate.id === id);
+        if (!entry) return current;
+        return {
+          ...current,
+          trash: current.trash.filter((candidate) => candidate.id !== id),
+          activityLog: withActivity(current, "trash_purged", entry.entityId, {
+            kind: entry.entityKind
+          })
+        };
+      });
+    },
+    [mutate]
+  );
+
+  const emptyTrash = useCallback(() => {
+    mutate((current) => current.trash.length ? { ...current, trash: [] } : current);
+  }, [mutate]);
+
+  const restoreRevision = useCallback(
+    (id: string) => {
+      let restored = false;
+      mutate((current) => {
+        const revision = current.revisionHistory.find((entry) => entry.id === id);
+        if (!revision) return current;
+        const now = new Date().toISOString();
+        const snapshot = revision.snapshot;
+
+        if (snapshot.kind === "task") {
+          const existing = current.tasks.find((task) => task.id === snapshot.task.id);
+          if (!existing) return current;
+          restored = true;
+          return {
+            ...current,
+            tasks: current.tasks.map((task) => task.id === existing.id ? {
+              ...snapshot.task,
+              id: existing.id,
+              createdAt: existing.createdAt,
+              updatedAt: now
+            } : task),
+            revisionHistory: appendEntityRevision(
+              current.revisionHistory,
+              createEntityRevision({ kind: "task", task: existing }, now),
+              0
+            ),
+            activityLog: withActivity(current, "revision_restored", existing.id, { kind: "task" })
+          };
+        }
+
+        if (snapshot.kind === "note") {
+          const existing = current.notes.find((note) => note.id === snapshot.note.id);
+          if (!existing) return current;
+          restored = true;
+          return {
+            ...current,
+            notes: current.notes.map((note) => note.id === existing.id ? {
+              ...snapshot.note,
+              id: existing.id,
+              origin: existing.origin,
+              createdAt: existing.createdAt,
+              updatedAt: now
+            } : note),
+            revisionHistory: appendEntityRevision(
+              current.revisionHistory,
+              createEntityRevision({ kind: "note", note: existing }, now),
+              0
+            ),
+            activityLog: withActivity(current, "revision_restored", existing.id, { kind: "note" })
+          };
+        }
+
+        if (snapshot.kind === "event") {
+          const existing = current.events.find((event) => event.id === snapshot.event.id);
+          if (!existing) return current;
+          restored = true;
+          return {
+            ...current,
+            events: current.events.map((event) => event.id === existing.id ? {
+              ...snapshot.event,
+              id: existing.id,
+              createdAt: existing.createdAt,
+              updatedAt: now
+            } : event),
+            revisionHistory: appendEntityRevision(
+              current.revisionHistory,
+              createEntityRevision({ kind: "event", event: existing }, now),
+              0
+            ),
+            activityLog: withActivity(current, "revision_restored", existing.id, { kind: "event" })
+          };
+        }
+
+        const existing = current.objectGraph.objects.find((object) => object.id === snapshot.object.id);
+        if (!existing) return current;
+        restored = true;
+        return {
+          ...current,
+          objectGraph: {
+            ...current.objectGraph,
+            objects: current.objectGraph.objects.map((object) => object.id === existing.id ? {
+              ...snapshot.object,
+              id: existing.id,
+              createdAt: existing.createdAt,
+              updatedAt: now,
+              revision: existing.revision + 1
+            } : object)
+          },
+          revisionHistory: appendEntityRevision(
+            current.revisionHistory,
+            createEntityRevision({ kind: "object", object: existing }, now),
+            0
+          ),
+          activityLog: withActivity(current, "revision_restored", existing.id, { kind: "object" })
+        };
+      });
+      return restored;
+    },
+    [mutate]
+  );
+
+  const clearRevisionHistory = useCallback(() => {
+    mutate((current) => current.revisionHistory.length ? { ...current, revisionHistory: [] } : current);
+  }, [mutate]);
+
   const value = useMemo<DashboardContextValue>(
     () => ({
       state,
@@ -1661,6 +1973,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       storageError,
       addObject,
       updateObject,
+      removeObject,
       addObjectRelation,
       removeObjectRelation,
       addTask,
@@ -1705,6 +2018,11 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       updateWidgets,
       addReadingItem,
       removeReadingItem,
+      restoreTrashEntry,
+      purgeTrashEntry,
+      emptyTrash,
+      restoreRevision,
+      clearRevisionHistory,
       replaceState
     }),
     [
@@ -1714,6 +2032,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       storageError,
       addObject,
       updateObject,
+      removeObject,
       addObjectRelation,
       removeObjectRelation,
       addTask,
@@ -1758,6 +2077,11 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       updateWidgets,
       addReadingItem,
       removeReadingItem,
+      restoreTrashEntry,
+      purgeTrashEntry,
+      emptyTrash,
+      restoreRevision,
+      clearRevisionHistory,
       replaceState
     ]
   );

@@ -68,6 +68,7 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
     state,
     addObject,
     updateObject,
+    removeObject,
     addObjectRelation,
     removeObjectRelation,
     updateTask,
@@ -155,6 +156,13 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
     }
   };
 
+  const removeNativeObject = () => {
+    if (object.source.kind !== "native") return;
+    if (!window.confirm("Переместить этот объект в корзину? Его содержание и связи можно будет восстановить.")) return;
+    removeObject(object.id);
+    navigate({ kind: "tool", tool: "workspace" });
+  };
+
   const connectExisting = (kind: "embeds" | "links", targetId: string) => {
     if (!targetId) return;
     try {
@@ -200,7 +208,7 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
           <label><span>Название</span><input value={title} onChange={(event) => setTitle(event.target.value)} disabled={readOnly} /></label>
           <label><span>Текст</span><textarea rows={14} value={body} onChange={(event) => setBody(event.target.value)} disabled={readOnly || structuredBody} placeholder="Пишите здесь. Позже этот редактор станет мультимодальным полотном." /></label>
           <div className="object-editor-actions">
-            {legacy?.type === "task" ? <button type="button" className="secondary-button" onClick={() => onEditTask(legacy.rawId)}>Параметры задачи</button> : <span />}
+            {legacy?.type === "task" ? <button type="button" className="secondary-button" onClick={() => onEditTask(legacy.rawId)}>Параметры задачи</button> : object.source.kind === "native" ? <button type="button" className="delete-task-button" onClick={removeNativeObject}><Trash2 size={16} /> В корзину</button> : <span />}
             <button className="primary-button" disabled={readOnly || !title.trim()}><Save size={16} /> Сохранить</button>
           </div>
           {message ? <p className="object-message" role="status">{message}</p> : null}

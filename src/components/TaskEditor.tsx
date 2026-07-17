@@ -76,7 +76,7 @@ export function TaskEditor({ taskId, onClose }: TaskEditorProps) {
   };
 
   const remove = () => {
-    if (!window.confirm("Удалить эту задачу? Действие пока нельзя отменить.")) return;
+    if (!window.confirm("Переместить эту задачу в корзину? Связанные фокус-блоки тоже можно будет восстановить.")) return;
     removeTask(task.id);
     onClose();
   };

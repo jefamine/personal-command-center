@@ -16,6 +16,7 @@ import {
 import { useRef, useState } from "react";
 import { downloadBackup, downloadMarkdownExport, readBackup } from "../lib/storage";
 import { PersonalContextPanel } from "../components/PersonalContextPanel";
+import { DataSafetyPanel } from "../components/DataSafetyPanel";
 import { useDashboard } from "../state/DashboardContext";
 import type {
   AccentPreset,
@@ -150,6 +151,8 @@ export function SettingsView() {
       </section>
 
       <PersonalContextPanel />
+
+      <DataSafetyPanel />
 
       <div className="settings-grid">
         <section className="panel settings-section">

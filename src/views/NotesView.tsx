@@ -47,7 +47,7 @@ export function NotesView({ initialNoteId = null }: NotesViewProps) {
   };
 
   const remove = () => {
-    if (!selected || !window.confirm("Удалить эту заметку?")) return;
+    if (!selected || !window.confirm("Переместить этот документ в корзину? Его можно будет восстановить в настройках.")) return;
     removeNote(selected.id);
     const remaining = state.notes.find((note) => note.id !== selected.id);
     setSelectedId(remaining?.id ?? null);

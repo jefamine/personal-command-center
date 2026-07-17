@@ -6,6 +6,7 @@ import type {
   CodexSnapshotScope,
   DashboardState,
   DashboardWidget,
+  EntityRevision,
   GoogleIntegrationSettings,
   Note,
   ObsidianIntegrationSettings,
@@ -13,7 +14,8 @@ import type {
   ReflectionAnalysis,
   ReflectionEntry,
   ReflectionStatus,
-  Task
+  Task,
+  TrashEntry
 } from "../types";
 import {
   installLifeAreaTemplates,
@@ -37,7 +39,17 @@ const DB_NAME = "personal-command-center";
 const DB_VERSION = 1;
 const STORE_NAME = "app";
 const STATE_KEY = "dashboard-state";
-const PRE_V13_SAFETY_KEY = "dashboard-state-before-v13";
+const PRE_V14_SAFETY_KEY = "dashboard-state-before-v14";
+const AUTO_BACKUP_INDEX_KEY = "dashboard-auto-backup-index";
+const AUTO_BACKUP_PREFIX = "dashboard-auto-backup:";
+const AUTO_BACKUP_INTERVAL_MS = 15 * 60 * 1000;
+const MAX_AUTO_BACKUPS = 5;
+
+export interface AutomaticBackupSummary {
+  key: string;
+  createdAt: string;
+  stateUpdatedAt: string;
+}
 
 type LegacyTask = Omit<Task, "recurrence" | "generatedFromTaskId"> &
   Partial<Pick<Task, "recurrence" | "generatedFromTaskId">>;
@@ -57,7 +69,7 @@ type LegacyAppSettings = Omit<AppSettings, AppearanceSettingKey> &
   Partial<Pick<AppSettings, AppearanceSettingKey>>;
 
 interface LegacyDashboardState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
   tasks: LegacyTask[];
   projects: LegacyProjectWithOptionalAreaId[];
   lifeAreas?: unknown;
@@ -77,6 +89,9 @@ interface LegacyDashboardState {
   reflections?: unknown[];
   assistantMemory?: unknown[];
   personalContext?: unknown;
+  objectGraph?: unknown;
+  trash?: unknown;
+  revisionHistory?: unknown;
   updatedAt: string;
 }
 
@@ -400,14 +415,14 @@ function normalizeWidgets(
 
 export function migrateState(candidate: DashboardState | LegacyDashboardState): DashboardState {
   const runtimeVersion = (candidate as { version?: unknown }).version;
-  if (!Number.isInteger(runtimeVersion) || Number(runtimeVersion) < 1 || Number(runtimeVersion) > 13) {
+  if (!Number.isInteger(runtimeVersion) || Number(runtimeVersion) < 1 || Number(runtimeVersion) > 14) {
     throw new Error(`Неподдерживаемая версия локальных данных: ${String(runtimeVersion)}.`);
   }
   if (
-    runtimeVersion === 13 &&
-    (!isRecord(candidate) || !hasValidV13CanonicalData(candidate))
+    runtimeVersion === 14 &&
+    (!isRecord(candidate) || !hasValidV14CanonicalData(candidate))
   ) {
-    throw new Error("Локальные данные v13 повреждены: автосохранение остановлено.");
+    throw new Error("Локальные данные v14 повреждены: автосохранение остановлено.");
   }
   const lifeModel = normalizeLifeModel(candidate.projects, candidate.lifeAreas);
   const installedTemplateVersion = Number.isInteger(candidate.settings.lifeAreaTemplatesVersion)
@@ -424,19 +439,20 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     lifeAreaTemplatesVersion: 1
   };
 
-  if (candidate.version === 13) {
+  if (candidate.version === 14) {
     const reflections = (candidate.reflections ?? [])
       .map((entry) => normalizeReflection(entry, true, true))
       .filter((entry): entry is ReflectionEntry => entry !== null);
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
         generatedFromTaskId: task.generatedFromTaskId ?? null
       })),
+      events: candidate.events ?? [],
       settings,
       integrations: mergeIntegrations(candidate.integrations),
       widgets: normalizeWidgets(candidate.widgets, false),
@@ -446,7 +462,41 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       reflections: reflectionNotes.reflections,
       assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
       personalContext: normalizePersonalContext(candidate.personalContext),
-      objectGraph: normalizeObjectGraph(candidate.objectGraph)
+      readingItems: candidate.readingItems ?? [],
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: normalizeObjectGraph(candidate.objectGraph),
+      trash: candidate.trash,
+      revisionHistory: candidate.revisionHistory
+    };
+  }
+  if (candidate.version === 13) {
+    const reflections = (candidate.reflections ?? [])
+      .map((entry) => normalizeReflection(entry, true, true))
+      .filter((entry): entry is ReflectionEntry => entry !== null);
+    const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
+    return {
+      ...candidate,
+      version: 14,
+      tasks: candidate.tasks.map((task) => ({
+        ...task,
+        recurrence: task.recurrence ?? "none",
+        generatedFromTaskId: task.generatedFromTaskId ?? null
+      })),
+      events: candidate.events ?? [],
+      settings,
+      integrations: mergeIntegrations(candidate.integrations),
+      widgets: normalizeWidgets(candidate.widgets, false),
+      projects: lifeModel.projects,
+      lifeAreas,
+      notes: reflectionNotes.notes,
+      reflections: reflectionNotes.reflections,
+      assistantMemory: normalizeAssistantMemory(candidate.assistantMemory),
+      personalContext: normalizePersonalContext(candidate.personalContext),
+      readingItems: candidate.readingItems ?? [],
+      activityLog: candidate.activityLog ?? [],
+      objectGraph: normalizeObjectGraph(candidate.objectGraph),
+      trash: [],
+      revisionHistory: []
     };
   }
   if (candidate.version === 12) {
@@ -456,7 +506,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -474,7 +524,9 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
       activityLog: candidate.activityLog ?? [],
-      objectGraph: createEmptyObjectGraph()
+      objectGraph: createEmptyObjectGraph(),
+      trash: [],
+      revisionHistory: []
     };
   }
   if (candidate.version === 11) {
@@ -484,7 +536,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -502,7 +554,9 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
       activityLog: candidate.activityLog ?? [],
-      objectGraph: createEmptyObjectGraph()
+      objectGraph: createEmptyObjectGraph(),
+      trash: [],
+      revisionHistory: []
     };
   }
   if (candidate.version === 10) {
@@ -512,7 +566,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -530,7 +584,9 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
       activityLog: candidate.activityLog ?? [],
-      objectGraph: createEmptyObjectGraph()
+      objectGraph: createEmptyObjectGraph(),
+      trash: [],
+      revisionHistory: []
     };
   }
   if (candidate.version === 9) {
@@ -540,7 +596,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -558,7 +614,9 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
       activityLog: candidate.activityLog ?? [],
-      objectGraph: createEmptyObjectGraph()
+      objectGraph: createEmptyObjectGraph(),
+      trash: [],
+      revisionHistory: []
     };
   }
   if (candidate.version === 8) {
@@ -568,7 +626,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -586,7 +644,9 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       personalContext: normalizePersonalContext(candidate.personalContext),
       readingItems: candidate.readingItems ?? [],
       activityLog: candidate.activityLog ?? [],
-      objectGraph: createEmptyObjectGraph()
+      objectGraph: createEmptyObjectGraph(),
+      trash: [],
+      revisionHistory: []
     };
   }
   if (candidate.version === 7) {
@@ -596,7 +656,7 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     const reflectionNotes = backfillReflectionNotes(candidate.notes ?? [], reflections);
     return {
       ...candidate,
-      version: 13,
+      version: 14,
       tasks: candidate.tasks.map((task) => ({
         ...task,
         recurrence: task.recurrence ?? "none",
@@ -614,12 +674,14 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
       personalContext: createDefaultPersonalContext(),
       readingItems: candidate.readingItems ?? [],
       activityLog: candidate.activityLog ?? [],
-      objectGraph: createEmptyObjectGraph()
+      objectGraph: createEmptyObjectGraph(),
+      trash: [],
+      revisionHistory: []
     };
   }
   return {
     ...candidate,
-    version: 13,
+    version: 14,
     tasks: candidate.tasks.map((task) => ({
       ...task,
       recurrence: task.recurrence ?? "none",
@@ -638,6 +700,8 @@ export function migrateState(candidate: DashboardState | LegacyDashboardState): 
     readingItems: candidate.readingItems ?? [],
     activityLog: candidate.activityLog ?? [],
     objectGraph: createEmptyObjectGraph(),
+    trash: [],
+    revisionHistory: [],
     updatedAt: new Date().toISOString()
   };
 }
@@ -674,10 +738,10 @@ export async function loadState(): Promise<DashboardState | null> {
         return;
       }
       const version = result ? Number((result as { version?: unknown }).version) : null;
-      if (result && version !== null && version <= 12) {
-        const safetyRequest = store.get(PRE_V13_SAFETY_KEY);
+      if (result && version !== null && version <= 13) {
+        const safetyRequest = store.get(PRE_V14_SAFETY_KEY);
         safetyRequest.onsuccess = () => {
-          if (safetyRequest.result === undefined) store.put(result, PRE_V13_SAFETY_KEY);
+          if (safetyRequest.result === undefined) store.put(result, PRE_V14_SAFETY_KEY);
         };
       }
     };
@@ -701,7 +765,56 @@ export async function saveState(state: DashboardState): Promise<void> {
   const database = await openDatabase();
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    transaction.objectStore(STORE_NAME).put(state, STATE_KEY);
+    const store = transaction.objectStore(STORE_NAME);
+    const previousRequest = store.get(STATE_KEY);
+    const indexRequest = store.get(AUTO_BACKUP_INDEX_KEY);
+    let previousReady = false;
+    let indexReady = false;
+    let previous: DashboardState | LegacyDashboardState | null = null;
+    let index: AutomaticBackupSummary[] = [];
+
+    const write = () => {
+      if (!previousReady || !indexReady) return;
+      const now = new Date();
+      const latestBackupAt = index[0] ? Date.parse(index[0].createdAt) : 0;
+      const previousUpdatedAt = previous && typeof previous.updatedAt === "string"
+        ? previous.updatedAt
+        : null;
+      const shouldBackup = previous &&
+        previousUpdatedAt !== state.updatedAt &&
+        (!latestBackupAt || now.getTime() - latestBackupAt >= AUTO_BACKUP_INTERVAL_MS);
+
+      if (shouldBackup && previousUpdatedAt) {
+        const createdAt = now.toISOString();
+        const key = `${AUTO_BACKUP_PREFIX}${createdAt}`;
+        const nextIndex = [
+          { key, createdAt, stateUpdatedAt: previousUpdatedAt },
+          ...index.filter((entry) => entry.key !== key)
+        ];
+        store.put(previous, key);
+        nextIndex.slice(MAX_AUTO_BACKUPS).forEach((entry) => store.delete(entry.key));
+        store.put(nextIndex.slice(0, MAX_AUTO_BACKUPS), AUTO_BACKUP_INDEX_KEY);
+      }
+      store.put(state, STATE_KEY);
+    };
+
+    previousRequest.onsuccess = () => {
+      previous = previousRequest.result as DashboardState | LegacyDashboardState | undefined ?? null;
+      previousReady = true;
+      write();
+    };
+    indexRequest.onsuccess = () => {
+      index = Array.isArray(indexRequest.result)
+        ? indexRequest.result.filter((entry): entry is AutomaticBackupSummary => (
+            isRecord(entry) &&
+            isNonEmptyString(entry.key) &&
+            isValidDateString(entry.createdAt) &&
+            isValidDateString(entry.stateUpdatedAt)
+          ))
+        : [];
+      indexReady = true;
+      write();
+    };
     transaction.oncomplete = () => {
       database.close();
       resolve();
@@ -713,6 +826,118 @@ export async function saveState(state: DashboardState): Promise<void> {
     transaction.onabort = () => {
       database.close();
       reject(transaction.error ?? new Error("Сохранение локального состояния отменено."));
+    };
+  });
+}
+
+export async function listAutomaticBackups(): Promise<AutomaticBackupSummary[]> {
+  const database = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const request = transaction.objectStore(STORE_NAME).get(AUTO_BACKUP_INDEX_KEY);
+    request.onsuccess = () => {
+      const entries = Array.isArray(request.result)
+        ? request.result.filter((entry): entry is AutomaticBackupSummary => (
+            isRecord(entry) &&
+            isNonEmptyString(entry.key) &&
+            isValidDateString(entry.createdAt) &&
+            isValidDateString(entry.stateUpdatedAt)
+          ))
+        : [];
+      database.close();
+      resolve(entries);
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error ?? new Error("Не удалось прочитать автоматические копии."));
+    };
+  });
+}
+
+export async function createAutomaticBackup(state: DashboardState): Promise<AutomaticBackupSummary> {
+  const database = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(AUTO_BACKUP_INDEX_KEY);
+    const createdAt = new Date().toISOString();
+    const summary: AutomaticBackupSummary = {
+      key: `${AUTO_BACKUP_PREFIX}${createdAt}`,
+      createdAt,
+      stateUpdatedAt: state.updatedAt
+    };
+    request.onsuccess = () => {
+      const current = Array.isArray(request.result)
+        ? request.result.filter((entry): entry is AutomaticBackupSummary => (
+            isRecord(entry) &&
+            isNonEmptyString(entry.key) &&
+            isValidDateString(entry.createdAt) &&
+            isValidDateString(entry.stateUpdatedAt)
+          ))
+        : [];
+      const next = [summary, ...current.filter((entry) => entry.key !== summary.key)];
+      store.put(state, summary.key);
+      next.slice(MAX_AUTO_BACKUPS).forEach((entry) => store.delete(entry.key));
+      store.put(next.slice(0, MAX_AUTO_BACKUPS), AUTO_BACKUP_INDEX_KEY);
+    };
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(summary);
+    };
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error ?? new Error("Не удалось создать контрольную копию."));
+    };
+  });
+}
+
+export async function loadAutomaticBackup(key: string): Promise<DashboardState> {
+  if (!key.startsWith(AUTO_BACKUP_PREFIX)) throw new Error("Недопустимый ключ резервной копии.");
+  const database = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const request = transaction.objectStore(STORE_NAME).get(key);
+    request.onsuccess = () => {
+      database.close();
+      if (!request.result) {
+        reject(new Error("Автоматическая копия не найдена."));
+        return;
+      }
+      try {
+        resolve(migrateState(request.result as DashboardState | LegacyDashboardState));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error ?? new Error("Не удалось восстановить автоматическую копию."));
+    };
+  });
+}
+
+export async function clearAutomaticBackups(): Promise<void> {
+  const database = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(AUTO_BACKUP_INDEX_KEY);
+    request.onsuccess = () => {
+      const entries = Array.isArray(request.result) ? request.result : [];
+      entries.forEach((entry) => {
+        if (isRecord(entry) && isNonEmptyString(entry.key) && entry.key.startsWith(AUTO_BACKUP_PREFIX)) {
+          store.delete(entry.key);
+        }
+      });
+      store.delete(AUTO_BACKUP_INDEX_KEY);
+    };
+    transaction.oncomplete = () => {
+      database.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error ?? new Error("Не удалось очистить автоматические копии."));
     };
   });
 }
@@ -1084,7 +1309,8 @@ const activityTypes = [
   "reflection_suggestion_edited", "reflection_suggestion_decided", "reflection_suggestion_note_applied",
   "reflection_suggestion_task_created", "memory_created", "memory_updated", "memory_paused",
   "memory_resumed", "memory_removed", "life_area_created", "life_area_updated", "life_area_removed",
-  "project_area_changed", "object_created", "object_updated", "object_relation_added", "object_relation_removed"
+  "project_area_changed", "object_created", "object_updated", "object_relation_added", "object_relation_removed",
+  "entity_trashed", "entity_restored", "trash_purged", "revision_restored"
 ];
 
 function isValidActivityEntry(value: unknown): boolean {
@@ -1100,9 +1326,71 @@ function isValidActivityEntry(value: unknown): boolean {
     validMetadata;
 }
 
-function hasValidV13CanonicalData(candidate: Record<string, unknown>): boolean {
+function isValidUniversalObjectSnapshot(value: unknown): boolean {
+  try {
+    normalizeObjectGraph({ schemaVersion: 1, objects: [value], relations: [] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidTrashEntry(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.snapshot)) return false;
+  const common = isNonEmptyString(value.id) &&
+    isNonEmptyString(value.entityId) &&
+    ["task", "note", "reflection", "event", "object"].includes(String(value.entityKind)) &&
+    typeof value.title === "string" &&
+    isValidDateString(value.deletedAt) &&
+    value.entityKind === value.snapshot.kind;
+  if (!common) return false;
+  if (value.snapshot.kind === "task") {
+    return isValidTask(value.snapshot.task) &&
+      Array.isArray(value.snapshot.linkedEvents) &&
+      value.snapshot.linkedEvents.every(isValidCalendarEvent);
+  }
+  if (value.snapshot.kind === "note") return isValidNote(value.snapshot.note);
+  if (value.snapshot.kind === "reflection") {
+    return isValidReflection(value.snapshot.reflection) &&
+      (value.snapshot.linkedNote === null || isValidNote(value.snapshot.linkedNote));
+  }
+  if (value.snapshot.kind === "event") return isValidCalendarEvent(value.snapshot.event);
+  if (value.snapshot.kind !== "object" || !isValidUniversalObjectSnapshot(value.snapshot.object)) return false;
+  const objectId = isRecord(value.snapshot.object) && isNonEmptyString(value.snapshot.object.id)
+    ? value.snapshot.object.id
+    : null;
+  if (!objectId) return false;
+  return Array.isArray(value.snapshot.relations) && value.snapshot.relations.every((relation) => (
+    isRecord(relation) &&
+    isNonEmptyString(relation.id) &&
+    ["contains", "links", "embeds"].includes(String(relation.kind)) &&
+    isNonEmptyString(relation.fromId) &&
+    isNonEmptyString(relation.toId) &&
+    relation.fromId !== relation.toId &&
+    (relation.fromId === objectId || relation.toId === objectId) &&
+    isFiniteInteger(relation.order, 0) &&
+    isValidDateString(relation.createdAt)
+  ));
+}
+
+function isValidEntityRevision(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.snapshot)) return false;
+  const common = isNonEmptyString(value.id) &&
+    isNonEmptyString(value.entityId) &&
+    ["task", "note", "event", "object"].includes(String(value.entityKind)) &&
+    typeof value.title === "string" &&
+    isValidDateString(value.capturedAt) &&
+    value.entityKind === value.snapshot.kind;
+  if (!common) return false;
+  if (value.snapshot.kind === "task") return isValidTask(value.snapshot.task);
+  if (value.snapshot.kind === "note") return isValidNote(value.snapshot.note);
+  if (value.snapshot.kind === "event") return isValidCalendarEvent(value.snapshot.event);
+  return value.snapshot.kind === "object" && isValidUniversalObjectSnapshot(value.snapshot.object);
+}
+
+function hasValidCanonicalData(candidate: Record<string, unknown>, expectedVersion: 13 | 14): boolean {
   if (
-    candidate.version !== 13 ||
+    candidate.version !== expectedVersion ||
     !Array.isArray(candidate.tasks) || !hasUniqueEntityIds(candidate.tasks, isValidTask) ||
     !Array.isArray(candidate.projects) || !hasUniqueEntityIds(candidate.projects, isValidProject) ||
     !Array.isArray(candidate.lifeAreas) || !hasUniqueEntityIds(candidate.lifeAreas, isValidLifeArea) ||
@@ -1128,9 +1416,30 @@ function hasValidV13CanonicalData(candidate: Record<string, unknown>): boolean {
   return true;
 }
 
+function hasValidV13CanonicalData(candidate: Record<string, unknown>): boolean {
+  return hasValidCanonicalData(candidate, 13);
+}
+
+function hasValidV14CanonicalData(candidate: Record<string, unknown>): boolean {
+  return hasValidCanonicalData(candidate, 14) &&
+    Array.isArray(candidate.trash) && hasUniqueEntityIds(candidate.trash, isValidTrashEntry) &&
+    Array.isArray(candidate.revisionHistory) &&
+      hasUniqueEntityIds(candidate.revisionHistory, isValidEntityRevision);
+}
+
 function isValidV13Backup(candidate: Record<string, unknown>): boolean {
   if (!hasValidV13CanonicalData(candidate)) return false;
 
+  try {
+    normalizeObjectGraph(candidate.objectGraph);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function isValidV14Backup(candidate: Record<string, unknown>): boolean {
+  if (!hasValidV14CanonicalData(candidate)) return false;
   try {
     normalizeObjectGraph(candidate.objectGraph);
   } catch {
@@ -1165,6 +1474,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
     assistantMemory?: unknown;
     personalContext?: unknown;
     objectGraph?: unknown;
+    trash?: unknown;
+    revisionHistory?: unknown;
     updatedAt?: unknown;
   };
   if (
@@ -1180,7 +1491,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
       candidate.version !== 10 &&
       candidate.version !== 11 &&
       candidate.version !== 12 &&
-      candidate.version !== 13) ||
+      candidate.version !== 13 &&
+      candidate.version !== 14) ||
     !Array.isArray(candidate.tasks) ||
     !Array.isArray(candidate.projects) ||
     (candidate.version >= 2 && !Array.isArray(candidate.events)) ||
@@ -1196,9 +1508,11 @@ export async function readBackup(file: File): Promise<DashboardState> {
     (candidate.version >= 9 && !Array.isArray(candidate.assistantMemory)) ||
     (candidate.version >= 11 && !reflectionsHaveSuggestionArrays(candidate.reflections)) ||
     (candidate.version >= 12 && !Array.isArray(candidate.lifeAreas)) ||
-    (candidate.version === 13 && !candidate.objectGraph) ||
+    (candidate.version >= 13 && !candidate.objectGraph) ||
+    (candidate.version === 14 && (!Array.isArray(candidate.trash) || !Array.isArray(candidate.revisionHistory))) ||
     !candidate.settings ||
-    (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>))
+    (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>)) ||
+    (candidate.version === 14 && !isValidV14Backup(candidate as Record<string, unknown>))
   ) {
     throw new Error("Файл не похож на резервную копию командного центра.");
   }

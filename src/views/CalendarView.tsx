@@ -90,7 +90,7 @@ export function CalendarView() {
   };
 
   const remove = (eventId: string) => {
-    if (window.confirm("Удалить календарный блок?")) removeEvent(eventId);
+    if (window.confirm("Переместить календарный блок в корзину?")) removeEvent(eventId);
   };
 
   const blockStyle = (start: number, end: number) => ({

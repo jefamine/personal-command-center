@@ -92,7 +92,7 @@ export function JournalView({ onOpenNote }: JournalViewProps) {
   };
 
   const removeSelected = () => {
-    if (!selected || !window.confirm("Удалить эту запись из дневника? Связанная заметка останется в заметках.")) return;
+    if (!selected || !window.confirm("Переместить эту запись в корзину? Связанный документ останется в рабочем пространстве.")) return;
     removeReflection(selected.id);
   };
 

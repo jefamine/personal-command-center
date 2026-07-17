@@ -1,4 +1,4 @@
-import type { ObjectGraph } from "./domain/objects/objectGraph";
+import type { ObjectGraph, ObjectRelation, UniversalObject } from "./domain/objects/objectGraph";
 
 export type ViewId =
   | "today"
@@ -421,10 +421,49 @@ export interface ActivityEntry {
     | "object_created"
     | "object_updated"
     | "object_relation_added"
-    | "object_relation_removed";
+    | "object_relation_removed"
+    | "entity_trashed"
+    | "entity_restored"
+    | "trash_purged"
+    | "revision_restored";
   entityId: string | null;
   timestamp: string;
   metadata: Record<string, string | number | boolean | null>;
+}
+
+export type RecoverableEntityKind = "task" | "note" | "reflection" | "event" | "object";
+
+export type RecoverableEntitySnapshot =
+  | { kind: "task"; task: Task; linkedEvents: CalendarEvent[] }
+  | { kind: "note"; note: Note }
+  | { kind: "reflection"; reflection: ReflectionEntry; linkedNote: Note | null }
+  | { kind: "event"; event: CalendarEvent }
+  | { kind: "object"; object: UniversalObject; relations: ObjectRelation[] };
+
+/** A recoverable tombstone. Payload is retained only until the user purges the entry. */
+export interface TrashEntry {
+  id: string;
+  entityId: string;
+  entityKind: RecoverableEntityKind;
+  title: string;
+  deletedAt: string;
+  snapshot: RecoverableEntitySnapshot;
+}
+
+export type RevisionSnapshot =
+  | { kind: "task"; task: Task }
+  | { kind: "note"; note: Note }
+  | { kind: "event"; event: CalendarEvent }
+  | { kind: "object"; object: UniversalObject };
+
+/** A bounded checkpoint captured before an editable entity changes. */
+export interface EntityRevision {
+  id: string;
+  entityId: string;
+  entityKind: RevisionSnapshot["kind"];
+  title: string;
+  capturedAt: string;
+  snapshot: RevisionSnapshot;
 }
 
 export type IntegrationStatus = "disconnected" | "configured" | "connected" | "error";
@@ -482,7 +521,7 @@ export interface IntegrationSettings {
 }
 
 export interface DashboardState {
-  version: 13;
+  version: 14;
   tasks: Task[];
   projects: Project[];
   lifeAreas: LifeArea[];
@@ -496,6 +535,8 @@ export interface DashboardState {
   widgets: DashboardWidget[];
   readingItems: ReadingItem[];
   activityLog: ActivityEntry[];
+  trash: TrashEntry[];
+  revisionHistory: EntityRevision[];
   /** Native universal objects and edges. Legacy arrays remain canonical during the transition. */
   objectGraph: ObjectGraph;
   updatedAt: string;

@@ -21,11 +21,11 @@ import type { Note, ReflectionAnalysisResponse, ReflectionEntry, Task } from "..
 
 describe("storage migration", () => {
   it("отклоняет неизвестную будущую версию вместо молчаливого понижения", () => {
-    const future = { ...createInitialState(), version: 14 };
+    const future = { ...createInitialState(), version: 15 };
     expect(() => migrateState(future as never)).toThrow("Неподдерживаемая версия");
   });
 
-  it("сохраняет нативный объект при повторной нормализации v13", () => {
+  it("сохраняет нативный объект при повторной нормализации v14", () => {
     const state = createInitialState();
     const object = createUniversalObject({ id: "native-doc", roles: ["document"], title: "Документ" }, {
       now: state.updatedAt
@@ -33,9 +33,26 @@ describe("storage migration", () => {
     state.objectGraph = addUniversalObject(state.objectGraph, object);
 
     const migrated = migrateState(state);
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.objectGraph.objects).toEqual([expect.objectContaining({ id: "native-doc" })]);
     expect(migrateState(migrated)).toEqual(migrated);
+  });
+
+  it("добавляет пустую корзину и историю при безопасной миграции v13", () => {
+    const current = createInitialState();
+    const { trash: _trash, revisionHistory: _history, ...legacy } = current;
+    const migrated = migrateState({ ...legacy, version: 13 } as never);
+
+    expect(migrated.version).toBe(14);
+    expect(migrated.trash).toEqual([]);
+    expect(migrated.revisionHistory).toEqual([]);
+    expect(migrated.tasks).toEqual(current.tasks);
+    expect(migrated.objectGraph).toEqual(current.objectGraph);
+  });
+
+  it("останавливает v14 с повреждённой корзиной до автосохранения", () => {
+    const broken = { ...createInitialState(), trash: [{ id: "incomplete" }] };
+    expect(() => migrateState(broken as never)).toThrow("Локальные данные v14 повреждены");
   });
 
   it("добавляет согласованные сферы в прежнее стартовое состояние и не повторяет миграцию", () => {
@@ -58,7 +75,7 @@ describe("storage migration", () => {
     expect(migrateState(migrated)).toEqual(migrated);
   });
 
-  it("отклоняет повреждённый объектный слой v13 без молчаливой потери записей", () => {
+  it("отклоняет повреждённый объектный слой v14 без молчаливой потери записей", () => {
     const state = createInitialState();
     const broken = {
       ...state,
@@ -74,9 +91,9 @@ describe("storage migration", () => {
     );
   });
 
-  it("останавливает загрузку повреждённой канонической сущности v13 до автосохранения", () => {
+  it("останавливает загрузку повреждённой канонической сущности v14 до автосохранения", () => {
     const broken = { ...createInitialState(), tasks: [{}] };
-    expect(() => migrateState(broken as never)).toThrow("Локальные данные v13 повреждены");
+    expect(() => migrateState(broken as never)).toThrow("Локальные данные v14 повреждены");
   });
 
   it("добавляет календарь в состояние первой версии", () => {
@@ -97,7 +114,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
 
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.objectGraph).toEqual({ schemaVersion: 1, objects: [], relations: [] });
     expect(migrated.events).toEqual([]);
     expect(migrated.notes).toEqual([]);
@@ -136,7 +153,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
 
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.settings.userName).toBe("Анна");
     expect(migrated.settings.theme).toBe("dark");
     expect(migrated.settings.cornerStyle).toBe("rounded");
@@ -185,7 +202,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
 
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.reflections).toEqual([]);
     expect(migrated.widgets.filter((widget) => widget.type === "reflection")).toHaveLength(1);
     expect(migrated.widgets.find((widget) => widget.type === "recommendations")?.enabled).toBe(false);
@@ -234,7 +251,7 @@ describe("storage migration", () => {
       updatedAt: "2026-07-15T10:01:00.000Z"
     });
 
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.reflections).toHaveLength(1);
     expect(migrated.reflections[0]).toMatchObject({
       id: "legacy-reflection",
@@ -323,7 +340,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(v8);
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.notes[0]).toEqual({ ...existingNote, origin: "reflection" });
     expect(migrated.reflections[0].noteId).toBe("existing-note");
     expect(migrated.reflections[1].noteId).toBe("reflection-note-needs-note");
@@ -397,7 +414,7 @@ describe("storage migration", () => {
     expect(migrateState(migrated)).toEqual(migrated);
   });
 
-  it("rejects a v13 backup when any canonical entity has an unsafe runtime shape", async () => {
+  it("rejects a v14 backup when any canonical entity has an unsafe runtime shape", async () => {
     const state = createInitialState();
     const fileFrom = (value: unknown) => ({
       text: async () => JSON.stringify(value)
@@ -625,7 +642,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(v9);
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.reflections[0]).toMatchObject({
       originalText,
       status: "queued",
@@ -656,7 +673,7 @@ describe("storage migration", () => {
           { id: "memory-v9", updatedAt: "2026-07-15T09:31:00.000Z" }
         ]
       }))
-    })).toThrow("Локальные данные v13 повреждены");
+    })).toThrow("Локальные данные v14 повреждены");
   });
 
   it("adds no retroactive suggestions in v10 and normalizes v11 suggestions all-or-nothing", () => {
@@ -707,7 +724,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(legacyV10);
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.reflections[0].suggestions).toEqual([]);
 
     const suggestion = {
@@ -737,7 +754,7 @@ describe("storage migration", () => {
         ...entry,
         suggestions: [suggestion, { ...suggestion, text: "Повтор" }]
       }))
-    })).toThrow("Локальные данные v13 повреждены");
+    })).toThrow("Локальные данные v14 повреждены");
 
     const questionSuggestion = {
       ...suggestion,
@@ -795,7 +812,7 @@ describe("storage migration", () => {
     };
 
     const migrated = migrateState(legacyV11);
-    expect(migrated.version).toBe(13);
+    expect(migrated.version).toBe(14);
     expect(migrated.lifeAreas).toHaveLength(1);
     expect(migrated.lifeAreas[0].title).toBe("Работа");
     expect(migrated.projects[0]).toMatchObject({
@@ -865,7 +882,7 @@ describe("storage migration", () => {
 
     for (const backup of backups) {
       const imported = await readBackup(fileFrom(backup));
-      expect(imported.version).toBe(13);
+      expect(imported.version).toBe(14);
       expect(imported.personalContext).toEqual(createDefaultPersonalContext());
     }
 
