@@ -22,6 +22,13 @@ declare const documentIdBrand: unique symbol;
  */
 export type DocumentId = string & { readonly [documentIdBrand]: "DocumentId" };
 
+/**
+ * Physical source of the canonical entity represented by a document record.
+ * The application layer and a future document repository use it to route
+ * operations to that canonical entity. React components must not choose their
+ * behaviour from the physical source; user-facing behaviour is determined by
+ * DocumentCapabilities and other domain properties instead.
+ */
 export type DocumentSource =
   | { readonly kind: "note"; readonly entityId: string }
   | { readonly kind: "native"; readonly entityId: string }
@@ -53,6 +60,12 @@ export interface DocumentRecord {
   readonly source: DocumentSource;
   readonly kind: "document" | "material";
   readonly title: string;
+  /**
+   * For a plain-text document this is the complete editable text content.
+   * For a structured document it is only a text projection for reading,
+   * searching, and previewing. The projection must never be written back in
+   * place of the original structured blocks.
+   */
   readonly content: string;
   readonly tags: readonly string[];
   readonly pinned: boolean;
