@@ -17,8 +17,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
+import { DocumentLinksPanel } from "../components/DocumentLinksPanel";
 import { hasReflectionTag } from "../domain/documents/documentContract";
-import { createDocumentRepository } from "../domain/documents/documentRepository";
+import { buildDocumentWikiLinkIndex, normalizeDocumentWikiTitle } from "../domain/documents/documentWikiLinks";
+import { useDocumentRepository } from "../hooks/useDocumentRepository";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
 
@@ -50,19 +52,14 @@ function formatDocumentDate(value: string): string {
 }
 
 export function WorkspaceView({ documentId }: WorkspaceViewProps) {
-  const {
-    state,
-    saving,
-    addNote,
-    updateNote,
-    removeNote,
-    updateObject,
-    removeObject
-  } = useDashboard();
+  const { state, saving } = useDashboard();
+  const documentRepository = useDocumentRepository();
   const { navigate } = useAppNavigation();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<WorkspaceFilter>("all");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [linkChooserOpen, setLinkChooserOpen] = useState(false);
+  const [linkQuery, setLinkQuery] = useState("");
   const [mobilePanel, setMobilePanel] = useState<"library" | "editor">(
     documentId ? "editor" : "library"
   );
@@ -70,22 +67,14 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const focusAfterCreateRef = useRef<string | null>(null);
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  const documentRepository = useMemo(() => createDocumentRepository({
-    getState: () => stateRef.current,
-    addNote,
-    updateNote,
-    updateNativeObject: updateObject,
-    removeNote,
-    removeNativeObject: removeObject
-  }), [addNote, removeNote, removeObject, updateNote, updateObject]);
+  const pendingCursorRef = useRef<number | null>(null);
   const documents = useMemo(() => [...documentRepository
     .listDocuments()]
     .sort((left, right) =>
       Number(right.pinned) - Number(left.pinned) ||
       right.updatedAt.localeCompare(left.updatedAt)
     ), [documentRepository, state]);
+  const wikiLinkIndex = useMemo(() => buildDocumentWikiLinkIndex(documents), [documents]);
 
   const selected = documents.find((document) => document.id === documentId) ?? null;
 
@@ -102,6 +91,25 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
     });
   }, [documents, filter, query]);
 
+  const linkCandidates = useMemo(() => {
+    if (!selected) return [];
+    const normalizedQuery = normalizeDocumentWikiTitle(linkQuery);
+    const titleCounts = new Map<string, number>();
+    documents.forEach((document) => {
+      const key = normalizeDocumentWikiTitle(document.title);
+      if (key) titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
+    });
+    return documents
+      .filter((document) => document.id !== selected.id)
+      .filter((document) => Boolean(normalizeDocumentWikiTitle(document.title)))
+      .filter((document) => !normalizedQuery || normalizeDocumentWikiTitle(document.title).includes(normalizedQuery))
+      .slice(0, 10)
+      .map((document) => ({
+        document,
+        isAmbiguous: (titleCounts.get(normalizeDocumentWikiTitle(document.title)) ?? 0) > 1
+      }));
+  }, [documents, linkQuery, selected]);
+
   useEffect(() => {
     if (documentId) setMobilePanel("editor");
   }, [documentId]);
@@ -109,6 +117,8 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   useEffect(() => {
     setTagsDraft(selected?.tags.join(", ") ?? "");
     setInspectorOpen(false);
+    setLinkChooserOpen(false);
+    setLinkQuery("");
   }, [selected?.id]);
 
   useEffect(() => {
@@ -125,6 +135,14 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       focusAfterCreateRef.current = null;
       requestAnimationFrame(() => textarea.focus());
     }
+    if (pendingCursorRef.current !== null) {
+      const cursor = pendingCursorRef.current;
+      pendingCursorRef.current = null;
+      requestAnimationFrame(() => {
+        textarea.focus();
+        textarea.setSelectionRange(cursor, cursor);
+      });
+    }
   }, [selected?.content, selected?.id, selected?.title]);
 
   const openDocument = (document: (typeof documents)[number]) => {
@@ -133,6 +151,11 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       { kind: "tool", tool: "workspace", documentId: document.id },
       { preserveTrail: true, label: document.title || "Документ" }
     );
+  };
+
+  const openDocumentById = (id: (typeof documents)[number]["id"]) => {
+    const document = documents.find((entry) => entry.id === id);
+    if (document) openDocument(document);
   };
 
   const createDocument = () => {
@@ -159,6 +182,19 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   const updateBody = (body: string) => {
     if (!selected || !selected.capabilities.supportsSimpleTextEditing) return;
     documentRepository.updateDocument(selected.id, { content: body });
+  };
+
+  const insertDocumentLink = (target: (typeof documents)[number]) => {
+    if (!selected || !selected.capabilities.canEditContent) return;
+    const textarea = bodyRef.current;
+    const start = textarea?.selectionStart ?? selected.content.length;
+    const end = textarea?.selectionEnd ?? start;
+    const token = `[[${target.title}]]`;
+    const content = `${selected.content.slice(0, start)}${token}${selected.content.slice(end)}`;
+    pendingCursorRef.current = start + token.length;
+    documentRepository.updateDocument(selected.id, { content });
+    setLinkChooserOpen(false);
+    setLinkQuery("");
   };
 
   const commitTags = () => {
@@ -280,6 +316,17 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                       {selected.pinned ? <PinOff size={17} /> : <Pin size={17} />}
                     </button>
                   ) : null}
+                  {selected.capabilities.canEditContent ? (
+                    <button
+                      type="button"
+                      className={linkChooserOpen ? "is-active" : ""}
+                      onClick={() => setLinkChooserOpen((value) => !value)}
+                      aria-label="Вставить ссылку"
+                      title="Вставить ссылку"
+                    >
+                      <Link2 size={17} />
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className={inspectorOpen ? "is-active" : ""}
@@ -324,6 +371,31 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                       ? <span className="is-reflection"><Sparkles size={12} /> осмысление</span>
                       : null}
                   </div>
+                  {linkChooserOpen ? (
+                    <section className="workspace-link-chooser" aria-label="Вставить ссылку">
+                      <header><strong>Вставить ссылку</strong><small>Выберите документ — вставим [[Название]] в позицию курсора.</small></header>
+                      <input
+                        value={linkQuery}
+                        onChange={(event) => setLinkQuery(event.target.value)}
+                        placeholder="Найти документ"
+                        aria-label="Найти документ для ссылки"
+                        autoFocus
+                      />
+                      <div>
+                        {linkCandidates.map(({ document, isAmbiguous }) => (
+                          <button
+                            type="button"
+                            key={document.id}
+                            onClick={() => insertDocumentLink(document)}
+                          >
+                            <span><strong>{document.title || "Без названия"}</strong><small>{document.kind === "material" ? "Материал" : "Документ"}</small></span>
+                            {isAmbiguous ? <em>название не уникально</em> : null}
+                          </button>
+                        ))}
+                        {!linkCandidates.length ? <p>Документы не найдены.</p> : null}
+                      </div>
+                    </section>
+                  ) : null}
                   <textarea
                     ref={bodyRef}
                     className="workspace-document-body"
@@ -342,6 +414,11 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                         : "Документ содержит несколько структурных блоков. Их редактирование появится в следующем срезе блочного редактора."}
                     </p>
                   ) : null}
+                  <DocumentLinksPanel
+                    document={selected}
+                    index={wikiLinkIndex}
+                    onOpenDocument={openDocumentById}
+                  />
                 </article>
               </div>
 

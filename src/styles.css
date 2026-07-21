@@ -4567,6 +4567,93 @@ body {
   font-size: calc(8.5px * var(--font-scale));
   line-height: 1.55;
 }
+.workspace-link-chooser {
+  display: grid;
+  gap: 9px;
+  margin-top: 18px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface-soft) 84%, var(--surface-strong));
+  box-shadow: 0 14px 28px color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.workspace-link-chooser header { display: grid; gap: 2px; }
+.workspace-link-chooser header strong { color: var(--ink); font-size: calc(9px * var(--font-scale)); }
+.workspace-link-chooser header small,
+.workspace-link-chooser p { margin: 0; color: var(--muted); font-size: calc(7.5px * var(--font-scale)); line-height: 1.45; }
+.workspace-link-chooser input {
+  width: 100%;
+  min-height: 35px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface-strong);
+  font: inherit;
+}
+.workspace-link-chooser > div { display: grid; gap: 4px; }
+.workspace-link-chooser > div > button {
+  min-height: 39px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.workspace-link-chooser > div > button:hover { background: var(--surface-strong); }
+.workspace-link-chooser > div > button span { display: grid; gap: 1px; }
+.workspace-link-chooser > div > button strong { font-size: calc(8px * var(--font-scale)); }
+.workspace-link-chooser > div > button small,
+.workspace-link-chooser > div > button em { color: var(--muted); font-size: calc(7px * var(--font-scale)); font-style: normal; }
+.workspace-link-chooser > div > button em { color: var(--warning); }
+.document-links-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 42px;
+  padding-top: 19px;
+  border-top: 1px solid var(--line-soft);
+}
+.document-links-panel > section { min-width: 0; }
+.document-links-panel header { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: calc(8px * var(--font-scale)); }
+.document-links-list,
+.document-backlinks-list { display: grid; gap: 5px; margin-top: 9px; }
+.document-links-list > button,
+.document-backlinks-list > button,
+.document-link-status {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface-soft);
+  font: inherit;
+  text-align: left;
+}
+.document-links-list > button,
+.document-backlinks-list > button { cursor: pointer; }
+.document-links-list > button:hover,
+.document-backlinks-list > button:hover { border-color: var(--line); background: var(--surface-strong); }
+.document-links-list > button span,
+.document-link-status strong,
+.document-backlinks-list > button strong { font-size: calc(7.8px * var(--font-scale)); }
+.document-link-status { display: grid; justify-content: start; }
+.document-link-status small,
+.document-backlinks-list > button small { color: var(--muted); font-size: calc(7px * var(--font-scale)); line-height: 1.4; }
+.document-link-status.is-ambiguous { border-color: color-mix(in srgb, var(--warning) 35%, var(--line-soft)); }
+.document-link-status.is-unresolved { color: var(--muted); }
+.document-backlinks-list > button { display: grid; justify-content: start; gap: 3px; }
+.document-links-empty { margin: 9px 0 0; color: var(--muted-2); font-size: calc(7.5px * var(--font-scale)); line-height: 1.45; }
 .workspace-inspector {
   position: absolute;
   inset: 56px 0 0 auto;
@@ -4717,6 +4804,7 @@ body {
   .workspace-writing-surface { width: calc(100% - 34px); padding: 38px 0 90px; }
   .workspace-document-title { font-size: clamp(32px, 10vw, 45px); }
   .workspace-document-body { font-size: calc(14px * var(--font-scale)); }
+  .document-links-panel { grid-template-columns: 1fr; }
   .workspace-inspector { inset: 56px 0 0; width: 100%; border-left: 0; }
   .workspace-stage-note { margin-bottom: 12px; }
 }

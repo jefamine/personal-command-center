@@ -1,4 +1,5 @@
 import {
+  ArrowUpRight,
   ArrowRight,
   Boxes,
   FileText,
@@ -12,6 +13,9 @@ import {
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { AppLink } from "../components/AppLink";
 import { EmptyState } from "../components/EmptyState";
+import type { DocumentRecord } from "../domain/documents/documentContract";
+import type { DocumentRepository } from "../domain/documents/documentRepository";
+import { useDocumentRepository } from "../hooks/useDocumentRepository";
 import {
   buildObjectCatalog,
   objectBacklinks,
@@ -63,6 +67,86 @@ export function blocksAfterSimpleBodyEdit(object: UniversalObject, body: string)
     : [createTextBlock(body)];
 }
 
+interface DocumentObjectViewProps {
+  document: DocumentRecord;
+  repository: DocumentRepository;
+  onOpenWorkspace: () => void;
+  onClose: () => void;
+}
+
+/** A document route inside the technical object page, backed only by the document API. */
+function DocumentObjectView({ document, repository, onOpenWorkspace, onClose }: DocumentObjectViewProps) {
+  const [title, setTitle] = useState(document.title);
+  const [content, setContent] = useState(document.content);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setTitle(document.title);
+    setContent(document.content);
+    setMessage("");
+  }, [document.content, document.id, document.title, document.updatedAt]);
+
+  const save = (event: FormEvent) => {
+    event.preventDefault();
+    if (!title.trim() || !document.capabilities.canEdit) return;
+    const result = repository.updateDocument(document.id, {
+      ...(document.capabilities.canEditTitle ? { title: title.trim() } : {}),
+      ...(document.capabilities.canEditContent ? { content } : {})
+    });
+    setMessage(result.status === "accepted" ? "Сохранено в единственном источнике данных." : "Не удалось сохранить изменения.");
+  };
+
+  const remove = () => {
+    if (!document.capabilities.canDelete) return;
+    if (!window.confirm("Переместить документ в корзину? Его можно будет восстановить в настройках.")) return;
+    const result = repository.deleteDocument(document.id);
+    if (result.status === "accepted") onClose();
+    else setMessage("Не удалось переместить документ в корзину.");
+  };
+
+  return (
+    <div className="page object-page">
+      <section className="object-hero">
+        <div className="object-hero-icon"><FileText size={24} /></div>
+        <div>
+          <span className="eyebrow">{document.kind === "material" ? "Материал" : "Документ"}</span>
+          <h1>{document.title || "Без названия"}</h1>
+          <p>Документ открыт через единый контракт рабочего пространства.</p>
+        </div>
+        <div className="object-hero-meta"><span>{document.tags.length} тегов</span></div>
+      </section>
+
+      <div className="object-layout">
+        <form className="panel object-editor" onSubmit={save}>
+          <div className="panel-heading"><div><span className="eyebrow">Содержание</span><h2>Документ</h2></div><FileText size={20} /></div>
+          <label><span>Название</span><input value={title} onChange={(event) => setTitle(event.target.value)} disabled={!document.capabilities.canEditTitle} /></label>
+          <label><span>Текст</span><textarea rows={14} value={content} onChange={(event) => setContent(event.target.value)} disabled={!document.capabilities.canEditContent} /></label>
+          <div className="object-editor-actions">
+            {document.capabilities.canDelete ? <button type="button" className="delete-task-button" onClick={remove}><Trash2 size={16} /> В корзину</button> : <span />}
+            <button className="primary-button" disabled={!document.capabilities.canEdit || !title.trim()}><Save size={16} /> Сохранить</button>
+          </div>
+          {message ? <p className="object-message" role="status">{message}</p> : null}
+          {!document.capabilities.supportsSimpleTextEditing ? (
+            <p className="object-readonly">
+              {document.kind === "material"
+                ? "Материал открыт только для чтения."
+                : "Структурный документ защищён от упрощённого текстового редактирования."}
+            </p>
+          ) : null}
+        </form>
+
+        <aside className="object-side">
+          <section className="panel object-connect">
+            <div className="panel-heading"><div><span className="eyebrow">Внутренние ссылки</span><h2>Рабочее пространство</h2></div><Link2 size={20} /></div>
+            <p className="object-readonly">Обычные ссылки создаются прямо в тексте через [[Название]].</p>
+            <button type="button" className="primary-button" onClick={onOpenWorkspace}><ArrowUpRight size={16} /> Открыть в рабочем пространстве</button>
+          </section>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
   const {
     state,
@@ -74,9 +158,9 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
     updateTask,
     updateProject,
     updateLifeArea,
-    updateEvent,
-    updateNote
+    updateEvent
   } = useDashboard();
+  const documentRepository = useDocumentRepository();
   const { navigate } = useAppNavigation();
   const catalog = useMemo(() => buildObjectCatalog(state), [state]);
   const object = catalog.byId.get(objectId) ?? null;
@@ -102,6 +186,21 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
     setBody(object ? objectBody(object) : "");
     setMessage("");
   }, [object?.id, object?.revision, object?.updatedAt]);
+
+  const documentLookup = documentRepository.getDocument(objectId);
+  if (documentLookup.status === "found") {
+    return (
+      <DocumentObjectView
+        document={documentLookup.document}
+        repository={documentRepository}
+        onOpenWorkspace={() => navigate({ kind: "tool", tool: "workspace", documentId: documentLookup.document.id }, {
+          preserveTrail: true,
+          label: documentLookup.document.title || "Документ"
+        })}
+        onClose={() => navigate({ kind: "tool", tool: "workspace" })}
+      />
+    );
+  }
 
   if (!object) {
     return (
@@ -132,7 +231,6 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
         if (legacy.type === "project") updateProject(legacy.rawId, { title: title.trim(), description: body });
         if (legacy.type === "area") updateLifeArea(legacy.rawId, { title: title.trim(), description: body });
         if (legacy.type === "event") updateEvent(legacy.rawId, { title: title.trim(), notes: body });
-        if (legacy.type === "note") updateNote(legacy.rawId, { title: title.trim(), body });
       }
       setMessage("Сохранено в единственном источнике данных.");
     } catch (error) {

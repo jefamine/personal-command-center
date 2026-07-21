@@ -1,6 +1,7 @@
 import { ArrowUpRight, Check, FileText, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { legacyObjectReference } from "../domain/objects/legacyAdapter";
+import type { DocumentId } from "../domain/documents/documentContract";
+import { useDocumentRepository } from "../hooks/useDocumentRepository";
 import { useDashboard } from "../state/DashboardContext";
 import type { DashboardWidget } from "../types";
 
@@ -34,14 +35,14 @@ export function documentBodyAfterTitle(body: string): string {
  * character and never creates a separate “reflection entry”.
  */
 export function DocumentWidget({ widget, onOpenWorkspace }: DocumentWidgetProps) {
-  const { state, saving, addNote, updateNote } = useDashboard();
-  const [documentId, setDocumentId] = useState<string | null>(null);
+  const { saving } = useDashboard();
+  const documentRepository = useDocumentRepository();
+  const [documentId, setDocumentId] = useState<DocumentId | null>(null);
   const [draft, setDraft] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const generatedTitleRef = useRef("Без названия");
-  const document = documentId
-    ? state.notes.find((note) => note.id === documentId) ?? null
-    : null;
+  const lookup = documentId ? documentRepository.getDocument(documentId) : null;
+  const document = lookup?.status === "found" ? lookup.document : null;
 
   useEffect(() => {
     if (documentId && !document) {
@@ -63,7 +64,11 @@ export function DocumentWidget({ widget, onOpenWorkspace }: DocumentWidgetProps)
     const generatedTitle = documentTitleFromBody(value);
     const generatedBody = documentBodyAfterTitle(value);
     if (!document) {
-      const created = addNote({ title: generatedTitle, body: generatedBody });
+      const created = documentRepository.createDocument({
+        title: generatedTitle,
+        content: generatedBody
+      });
+      if (created.status !== "created") return;
       generatedTitleRef.current = generatedTitle;
       setDocumentId(created.id);
       return;
@@ -72,8 +77,8 @@ export function DocumentWidget({ widget, onOpenWorkspace }: DocumentWidgetProps)
       document.title === generatedTitleRef.current ||
       document.title === "Без названия" ||
       !document.title.trim();
-    updateNote(document.id, {
-      body: titleIsAutomatic ? generatedBody : value,
+    documentRepository.updateDocument(document.id, {
+      content: titleIsAutomatic ? generatedBody : value,
       ...(titleIsAutomatic ? { title: generatedTitle } : {})
     });
     if (titleIsAutomatic) generatedTitleRef.current = generatedTitle;
@@ -87,9 +92,7 @@ export function DocumentWidget({ widget, onOpenWorkspace }: DocumentWidgetProps)
   };
 
   const open = () => {
-    onOpenWorkspace(document
-      ? legacyObjectReference("note", document.id)
-      : undefined);
+    onOpenWorkspace(document?.id);
   };
 
   return (
