@@ -444,9 +444,23 @@ export type RecoverableEntityKind = "task" | "note" | "event" | "object";
 
 export type RecoverableEntitySnapshot =
   | { kind: "task"; task: Task; linkedEvents: CalendarEvent[] }
-  | { kind: "note"; note: Note }
+  | { kind: "note"; note: Note; relations: ObjectRelation[] }
   | { kind: "event"; event: CalendarEvent }
   | { kind: "object"; object: UniversalObject; relations: ObjectRelation[] };
+
+export type PendingRelationReason =
+  | "missing-from"
+  | "missing-to"
+  | "missing-endpoints"
+  | "invariant-rejected"
+  | "binding-ambiguous";
+
+/** Persisted remainder of a relation that cannot yet return to the live graph. */
+export interface PendingRelationRecovery {
+  relation: ObjectRelation;
+  reason: PendingRelationReason;
+  capturedAt: string;
+}
 
 /** A recoverable tombstone. Payload is retained only until the user purges the entry. */
 export interface TrashEntry {
@@ -529,7 +543,7 @@ export interface IntegrationSettings {
 }
 
 export interface DashboardState {
-  version: 15;
+  version: 16;
   tasks: Task[];
   projects: Project[];
   lifeAreas: LifeArea[];
@@ -544,6 +558,7 @@ export interface DashboardState {
   activityLog: ActivityEntry[];
   trash: TrashEntry[];
   revisionHistory: EntityRevision[];
+  pendingRelations: PendingRelationRecovery[];
   /** Native universal objects and edges. Legacy arrays remain canonical during the transition. */
   objectGraph: ObjectGraph;
   updatedAt: string;

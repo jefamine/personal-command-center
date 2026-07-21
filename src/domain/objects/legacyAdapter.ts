@@ -69,7 +69,8 @@ function legacyRelation(
     fromId,
     toId,
     order: 0,
-    createdAt
+    createdAt,
+    origin: "manual"
   };
 }
 
@@ -282,4 +283,3 @@ export function objectChildren(catalog: ObjectCatalog, parentId: string): Array<
 export function objectBacklinks(catalog: ObjectCatalog, objectId: string): ObjectRelation[] {
   return catalog.relations.filter((relation) => relation.toId === objectId);
 }
-

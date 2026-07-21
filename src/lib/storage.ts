@@ -34,12 +34,17 @@ import { normalizeReflectionMemoryReferences } from "../domain/reflections/refle
 import { normalizeReflectionSuggestions } from "../domain/reflections/reflectionSuggestions";
 import { normalizeWidgetLayout } from "./widgetLayout";
 import { createEmptyObjectGraph, normalizeObjectGraph } from "../domain/objects/objectGraph";
+import {
+  assertPersistedRelationEndpoints,
+  quarantineDanglingRelations
+} from "../domain/relations/relationRepository";
 
 const DB_NAME = "personal-command-center";
 const DB_VERSION = 1;
 const STORE_NAME = "app";
 const STATE_KEY = "dashboard-state";
 const PRE_V15_SAFETY_KEY = "dashboard-state-before-v15";
+const PRE_V16_SAFETY_KEY = "dashboard-state-before-v16";
 const AUTO_BACKUP_INDEX_KEY = "dashboard-auto-backup-index";
 const AUTO_BACKUP_PREFIX = "dashboard-auto-backup:";
 const AUTO_BACKUP_INTERVAL_MS = 15 * 60 * 1000;
@@ -123,7 +128,7 @@ interface LegacyDashboardState {
 
 interface DashboardStateV14 extends Omit<
   DashboardState,
-  "version" | "notes" | "assistantMemory" | "trash" | "revisionHistory"
+  "version" | "notes" | "assistantMemory" | "trash" | "revisionHistory" | "pendingRelations"
 > {
   version: 14;
   notes: LegacyNote[];
@@ -133,7 +138,16 @@ interface DashboardStateV14 extends Omit<
   revisionHistory: unknown[];
 }
 
-type MigrationCandidate = DashboardState | DashboardStateV14 | LegacyDashboardState;
+interface DashboardStateV15 extends Omit<
+  DashboardState,
+  "version" | "pendingRelations" | "trash" | "objectGraph"
+> {
+  version: 15;
+  objectGraph: unknown;
+  trash: unknown[];
+}
+
+type MigrationCandidate = DashboardState | DashboardStateV15 | DashboardStateV14 | LegacyDashboardState;
 
 const reflectionStatuses: ReflectionStatus[] = [
   "captured",
@@ -497,7 +511,7 @@ function mergeLegacyReflectionIntoNote(
   };
 }
 
-function upgradeV14ToV15(candidate: DashboardStateV14): DashboardState {
+function upgradeV14ToV15(candidate: DashboardStateV14): DashboardStateV15 {
   const { reflections: _legacyReflections, ...stateWithoutLegacyReflections } = candidate;
   const notes = candidate.notes.map(normalizeCurrentNote);
   const noteIndexes = new Map(notes.map((note, index) => [note.id, index] as const));
@@ -590,17 +604,20 @@ function upgradeV14ToV15(candidate: DashboardStateV14): DashboardState {
         entityId: note.id,
         title: typeof value.title === "string" ? value.title : note.title,
         deletedAt: typeof value.deletedAt === "string" ? value.deletedAt : reflection.updatedAt,
-        snapshot: { kind: "note", note }
+        snapshot: { kind: "note", note, relations: [] }
       }];
     }
     if (value.snapshot.kind === "note" && isRecord(value.snapshot.note)) {
       return [{
-        ...value,
+        id: String(value.id),
         entityKind: "note",
         entityId: String(value.entityId),
+        title: typeof value.title === "string" ? value.title : "Без названия",
+        deletedAt: typeof value.deletedAt === "string" ? value.deletedAt : new Date(0).toISOString(),
         snapshot: {
           kind: "note",
-          note: normalizeCurrentNote(value.snapshot.note as unknown as LegacyNote)
+          note: normalizeCurrentNote(value.snapshot.note as unknown as LegacyNote),
+          relations: []
         }
       } as TrashEntry];
     }
@@ -983,21 +1000,69 @@ function migrateToV14(candidate: DashboardStateV14 | LegacyDashboardState): Dash
 
 export function migrateState(candidate: MigrationCandidate): DashboardState {
   const runtimeVersion = Number((candidate as { version?: unknown }).version);
-  if (!Number.isInteger(runtimeVersion) || runtimeVersion < 1 || runtimeVersion > 15) {
+  if (!Number.isInteger(runtimeVersion) || runtimeVersion < 1 || runtimeVersion > 16) {
     throw new Error(`Неподдерживаемая версия локальных данных: ${String(runtimeVersion)}.`);
+  }
+  if (runtimeVersion === 16) {
+    if (!isRecord(candidate) || !hasValidV16CanonicalData(candidate)) {
+      throw new Error("Локальные данные v16 повреждены: автосохранение остановлено.");
+    }
+    const state = candidate as DashboardState;
+    assertPersistedRelationEndpoints(state);
+    return { ...state, widgets: normalizeWidgets(state.widgets, false) };
   }
   if (runtimeVersion === 15) {
     if (!isRecord(candidate) || !hasValidV15CanonicalData(candidate)) {
       throw new Error("Локальные данные v15 повреждены: автосохранение остановлено.");
     }
-    return {
-      ...(candidate as DashboardState),
-      widgets: normalizeWidgets((candidate as DashboardState).widgets, false)
-    };
+    return upgradeV15ToV16(candidate as DashboardStateV15);
   }
-  return upgradeV14ToV15(
+  return upgradeV15ToV16(upgradeV14ToV15(
     migrateToV14(candidate as DashboardStateV14 | LegacyDashboardState)
-  );
+  ));
+}
+
+function migrateManualRelation(value: unknown) {
+  if (!isRecord(value)) return value;
+  return { ...value, origin: "manual" as const };
+}
+
+function upgradeV15ToV16(candidate: DashboardStateV15): DashboardState {
+  const objectGraph = normalizeObjectGraph(candidate.objectGraph);
+  const trash = candidate.trash.map((entry) => {
+    if (!isRecord(entry) || !isRecord(entry.snapshot)) return entry as unknown as TrashEntry;
+    if (entry.snapshot.kind === "note") {
+      return {
+        ...entry,
+        snapshot: {
+          ...entry.snapshot,
+          relations: Array.isArray(entry.snapshot.relations)
+            ? entry.snapshot.relations.map(migrateManualRelation)
+            : []
+        }
+      } as unknown as TrashEntry;
+    }
+    if (entry.snapshot.kind === "object" && Array.isArray(entry.snapshot.relations)) {
+      return {
+        ...entry,
+        snapshot: {
+          ...entry.snapshot,
+          relations: entry.snapshot.relations.map(migrateManualRelation)
+        }
+      } as unknown as TrashEntry;
+    }
+    return entry as unknown as TrashEntry;
+  });
+  const state = quarantineDanglingRelations({
+    ...candidate,
+    version: 16,
+    objectGraph,
+    trash,
+    pendingRelations: [],
+    widgets: normalizeWidgets(candidate.widgets, false)
+  }, candidate.updatedAt);
+  assertPersistedRelationEndpoints(state);
+  return state;
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -1032,10 +1097,11 @@ export async function loadState(): Promise<DashboardState | null> {
         return;
       }
       const version = result ? Number((result as { version?: unknown }).version) : null;
-      if (result && version !== null && version <= 14) {
-        const safetyRequest = store.get(PRE_V15_SAFETY_KEY);
+      if (result && version !== null && version <= 15) {
+        const safetyKey = version <= 14 ? PRE_V15_SAFETY_KEY : PRE_V16_SAFETY_KEY;
+        const safetyRequest = store.get(safetyKey);
         safetyRequest.onsuccess = () => {
-          if (safetyRequest.result === undefined) store.put(result, PRE_V15_SAFETY_KEY);
+          if (safetyRequest.result === undefined) store.put(result, safetyKey);
         };
       }
     };
@@ -1799,6 +1865,44 @@ function hasValidV15CanonicalData(candidate: Record<string, unknown>): boolean {
   return true;
 }
 
+function hasExplicitRelationOrigin(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.origin === "manual") return value.binding === undefined;
+  if (value.origin !== "wiki-link" && value.origin !== "wiki-embed") return false;
+  if ((value.origin === "wiki-link" && value.kind !== "links") ||
+    (value.origin === "wiki-embed" && value.kind !== "embeds") ||
+    !isRecord(value.binding)) return false;
+  return isNonEmptyString(value.binding.labelAtBinding) &&
+    isFiniteInteger(value.binding.occurrence, 0) &&
+    isFiniteInteger(value.binding.lastKnownStart, 0) &&
+    isFiniteInteger(value.binding.lastKnownEnd, 1) &&
+    Number(value.binding.lastKnownEnd) > Number(value.binding.lastKnownStart) &&
+    isNonEmptyString(value.binding.contextFingerprint);
+}
+
+function trashRelationsHaveV16Shape(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.snapshot)) return false;
+  if (value.snapshot.kind !== "note" && value.snapshot.kind !== "object") return true;
+  return Array.isArray(value.snapshot.relations) &&
+    value.snapshot.relations.every(hasExplicitRelationOrigin);
+}
+
+function hasValidV16CanonicalData(candidate: Record<string, unknown>): boolean {
+  const asV15 = { ...candidate, version: 15 };
+  if (!hasValidV15CanonicalData(asV15) ||
+    candidate.version !== 16 ||
+    !Array.isArray(candidate.trash) || !candidate.trash.every(trashRelationsHaveV16Shape) ||
+    !isRecord(candidate.objectGraph) || !Array.isArray(candidate.objectGraph.relations) ||
+    !candidate.objectGraph.relations.every(hasExplicitRelationOrigin) ||
+    !Array.isArray(candidate.pendingRelations)) return false;
+  return candidate.pendingRelations.every((entry) => (
+    isRecord(entry) &&
+    ["missing-from", "missing-to", "missing-endpoints", "invariant-rejected", "binding-ambiguous"].includes(String(entry.reason)) &&
+    isValidDateString(entry.capturedAt) &&
+    hasExplicitRelationOrigin(entry.relation)
+  ));
+}
+
 function hasValidCanonicalData(candidate: Record<string, unknown>, expectedVersion: 13 | 14): boolean {
   if (
     candidate.version !== expectedVersion ||
@@ -1904,7 +2008,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
       candidate.version !== 12 &&
       candidate.version !== 13 &&
       candidate.version !== 14 &&
-      candidate.version !== 15) ||
+      candidate.version !== 15 &&
+      candidate.version !== 16) ||
     !Array.isArray(candidate.tasks) ||
     !Array.isArray(candidate.projects) ||
     (candidate.version >= 2 && !Array.isArray(candidate.events)) ||
@@ -1926,7 +2031,8 @@ export async function readBackup(file: File): Promise<DashboardState> {
     !candidate.settings ||
     (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>)) ||
     (candidate.version === 14 && !isValidV14Backup(candidate as Record<string, unknown>)) ||
-    (candidate.version === 15 && !hasValidV15CanonicalData(candidate as Record<string, unknown>))
+    (candidate.version === 15 && !hasValidV15CanonicalData(candidate as Record<string, unknown>)) ||
+    (candidate.version === 16 && !hasValidV16CanonicalData(candidate as Record<string, unknown>))
   ) {
     throw new Error("Файл не похож на резервную копию командного центра.");
   }

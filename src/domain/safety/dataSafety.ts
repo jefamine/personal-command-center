@@ -81,7 +81,8 @@ export function taskTrashEntry(
 export function noteTrashEntry(
   note: Note,
   deletedAt = new Date().toISOString(),
-  id: string = crypto.randomUUID()
+  id: string = crypto.randomUUID(),
+  relations: ObjectRelation[] = []
 ): TrashEntry {
   return {
     id,
@@ -89,7 +90,7 @@ export function noteTrashEntry(
     entityKind: "note",
     title: note.title,
     deletedAt,
-    snapshot: { kind: "note", note }
+    snapshot: { kind: "note", note, relations }
   };
 }
 

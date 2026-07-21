@@ -20,16 +20,29 @@ import { loadState, saveState } from "../lib/storage";
 import { normalizeWidgetLayout } from "../lib/widgetLayout";
 import { safeExternalUrl } from "../lib/url";
 import {
-  addObjectRelation as addGraphRelation,
   addUniversalObject as addGraphObject,
   createUniversalObject,
   patchUniversalObject,
-  removeObjectRelation as removeGraphRelation,
   type ObjectRelation,
   type ObjectRelationDraft,
   type UniversalObject,
   type UniversalObjectDraft
 } from "../domain/objects/objectGraph";
+import { materialDocumentId, noteDocumentId, type DocumentId } from "../domain/documents/documentContract";
+import { listDocumentRecords } from "../domain/documents/documentRepository";
+import type { DocumentWikiLinkToken } from "../domain/documents/documentWikiLinks";
+import {
+  addRelationToState,
+  bindDocumentReference as bindReferenceInState,
+  captureRelationsForDeletion,
+  reconcileDocumentReferences as reconcileReferencesInState,
+  rebindDocumentReference as rebindReferenceInState,
+  removeRelationFromState,
+  restoreCapturedRelations,
+  retryPendingRelations,
+  type ReferenceReconciliationResult,
+  type RelationMutationResult
+} from "../domain/relations/relationRepository";
 import { lifeAreaTitleKey } from "../domain/life/lifeAreas";
 import {
   appendEntityRevision,
@@ -102,6 +115,13 @@ interface DashboardContextValue {
   removeObject: (id: string) => void;
   addObjectRelation: (draft: ObjectRelationDraft) => ObjectRelation;
   removeObjectRelation: (relationId: string) => void;
+  reconcileDocumentRelations: (documentId: DocumentId) => ReferenceReconciliationResult | null;
+  bindDocumentReference: (
+    sourceId: DocumentId,
+    targetId: DocumentId,
+    token: DocumentWikiLinkToken
+  ) => RelationMutationResult;
+  rebindDocumentReference: (relationId: string, token: DocumentWikiLinkToken) => RelationMutationResult;
   addTask: (draft: TaskDraft) => Task;
   updateTask: (id: string, changes: TaskUpdate) => void;
   toggleTask: (id: string) => void;
@@ -399,17 +419,22 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       const now = new Date().toISOString();
       const object = createUniversalObject(draft, { now });
       mutate((current) => {
-        let objectGraph = addGraphObject(current.objectGraph, object);
+        let next: DashboardState = {
+          ...current,
+          objectGraph: addGraphObject(current.objectGraph, object)
+        };
         if (placement) {
-          objectGraph = addGraphRelation(objectGraph, {
+          const added = addRelationToState(next, {
             kind: placement.kind ?? "contains",
             fromId: placement.parentId,
-            toId: object.id
+            toId: object.id,
+            origin: "manual"
           }, { now });
+          if (added.result.status === "rejected") throw new Error(added.result.message);
+          next = added.state;
         }
         return {
-          ...current,
-          objectGraph,
+          ...next,
           activityLog: withActivity(current, "object_created", object.id, {
             parentId: placement?.parentId ?? null,
             relation: placement?.kind ?? (placement ? "contains" : null)
@@ -453,18 +478,13 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       mutate((current) => {
         const object = current.objectGraph.objects.find((entry) => entry.id === id);
         if (!object) return current;
-        const relations = current.objectGraph.relations.filter(
-          (relation) => relation.fromId === id || relation.toId === id
-        );
-        const trashed = objectTrashEntry(object, relations);
+        const captured = captureRelationsForDeletion(current, id);
+        const trashed = objectTrashEntry(object, [...captured.relations]);
         return {
-          ...current,
+          ...captured.state,
           objectGraph: {
-            ...current.objectGraph,
-            objects: current.objectGraph.objects.filter((entry) => entry.id !== id),
-            relations: current.objectGraph.relations.filter(
-              (relation) => relation.fromId !== id && relation.toId !== id
-            )
+            ...captured.state.objectGraph,
+            objects: captured.state.objectGraph.objects.filter((entry) => entry.id !== id)
           },
           trash: [trashed, ...current.trash],
           activityLog: withActivity(current, "entity_trashed", id, { kind: "object" })
@@ -477,27 +497,23 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   const addObjectRelation = useCallback(
     (draft: ObjectRelationDraft) => {
       const now = new Date().toISOString();
-      const relation: ObjectRelation = {
-        id: draft.id ?? crypto.randomUUID(),
-        kind: draft.kind,
-        fromId: draft.fromId,
-        toId: draft.toId,
-        order: draft.order ?? 0,
-        createdAt: now
-      };
-      mutate((current) => ({
-        ...current,
-        objectGraph: addGraphRelation(current.objectGraph, relation, {
-          now,
-          idFactory: () => relation.id
-        }),
-        activityLog: withActivity(current, "object_relation_added", relation.id, {
-          kind: relation.kind,
-          fromId: relation.fromId,
-          toId: relation.toId
-        })
-      }));
-      return relation;
+      const id = draft.id ?? crypto.randomUUID();
+      let created: ObjectRelation | null = null;
+      mutate((current) => {
+        const added = addRelationToState(current, { ...draft, id }, { now, idFactory: () => id });
+        if (added.result.status === "rejected") throw new Error(added.result.message);
+        created = added.result.relation;
+        return {
+          ...added.state,
+          activityLog: withActivity(current, "object_relation_added", id, {
+            kind: created.kind,
+            fromId: created.fromId,
+            toId: created.toId
+          })
+        };
+      });
+      if (!created) throw new Error("Связь не была создана.");
+      return created;
     },
     [mutate]
   );
@@ -507,14 +523,57 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       mutate((current) => {
         if (!current.objectGraph.relations.some((relation) => relation.id === relationId)) return current;
         return {
-          ...current,
-          objectGraph: removeGraphRelation(current.objectGraph, relationId),
+          ...removeRelationFromState(current, relationId),
           activityLog: withActivity(current, "object_relation_removed", relationId)
         };
       });
     },
     [mutate]
   );
+
+  const reconcileDocumentRelations = useCallback((documentId: DocumentId) => {
+    let result: ReferenceReconciliationResult | null = null;
+    mutate((current) => {
+      const documents = listDocumentRecords(current);
+      const source = documents.find((document) => document.id === documentId);
+      if (!source) return current;
+      result = reconcileReferencesInState(current, source, documents);
+      return result.state;
+    });
+    return result;
+  }, [mutate]);
+
+  const bindDocumentReference = useCallback((
+    sourceId: DocumentId,
+    targetId: DocumentId,
+    token: DocumentWikiLinkToken
+  ) => {
+    let result: RelationMutationResult = {
+      status: "rejected",
+      code: "command-rejected",
+      message: "Связь не была создана."
+    };
+    mutate((current) => {
+      const bound = bindReferenceInState(current, sourceId, targetId, token);
+      result = bound.result;
+      return bound.state;
+    });
+    return result;
+  }, [mutate]);
+
+  const rebindDocumentReference = useCallback((relationId: string, token: DocumentWikiLinkToken) => {
+    let result: RelationMutationResult = {
+      status: "rejected",
+      code: "command-rejected",
+      message: "Связь не была обновлена."
+    };
+    mutate((current) => {
+      const rebound = rebindReferenceInState(current, relationId, token);
+      result = rebound.result;
+      return rebound.state;
+    });
+    return result;
+  }, [mutate]);
 
   const addTask = useCallback(
     (draft: TaskDraft) => {
@@ -738,10 +797,11 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         if (!current.notes.some((note) => note.id === id)) return current;
         const note = current.notes.find((entry) => entry.id === id)!;
         const now = new Date().toISOString();
-        const trashed = noteTrashEntry(note, now);
+        const captured = captureRelationsForDeletion(current, noteDocumentId(id));
+        const trashed = noteTrashEntry(note, now, undefined, [...captured.relations]);
         return {
-          ...current,
-          notes: current.notes.filter((note) => note.id !== id),
+          ...captured.state,
+          notes: captured.state.notes.filter((note) => note.id !== id),
           trash: [trashed, ...current.trash],
           activityLog: withActivity(current, "entity_trashed", id, { kind: "note" })
         };
@@ -1186,10 +1246,11 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         const reflection = current.notes.find((entry) => entry.id === id);
         if (!reflection || !isReflectionDocument(reflection)) return current;
         const now = new Date().toISOString();
-        const trashed = noteTrashEntry(reflection, now);
+        const captured = captureRelationsForDeletion(current, noteDocumentId(id));
+        const trashed = noteTrashEntry(reflection, now, undefined, [...captured.relations]);
         return {
-          ...current,
-          notes: current.notes.filter((entry) => entry.id !== id),
+          ...captured.state,
+          notes: captured.state.notes.filter((entry) => entry.id !== id),
           trash: [trashed, ...current.trash],
           activityLog: withActivity(current, "entity_trashed", id, { kind: "note" })
         };
@@ -1731,10 +1792,15 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const removeReadingItem = useCallback(
     (id: string) => {
-      mutate((current) => ({
-        ...current,
-        readingItems: current.readingItems.filter((item) => item.id !== id)
-      }));
+      mutate((current) => {
+        if (!current.readingItems.some((item) => item.id === id)) return current;
+        const captured = captureRelationsForDeletion(current, materialDocumentId(id));
+        const withoutMaterial: DashboardState = {
+          ...captured.state,
+          readingItems: captured.state.readingItems.filter((item) => item.id !== id)
+        };
+        return restoreCapturedRelations(withoutMaterial, captured.relations).state;
+      });
     },
     [mutate]
   );
@@ -1762,29 +1828,24 @@ export function DashboardProvider({ children }: PropsWithChildren) {
         } else if (snapshot.kind === "note") {
           if (current.notes.some((note) => note.id === snapshot.note.id)) return current;
           next = { ...current, notes: [snapshot.note, ...current.notes] };
+          next = restoreCapturedRelations(next, snapshot.relations).state;
+          next = retryPendingRelations(next).state;
         } else if (snapshot.kind === "event") {
           if (current.events.some((event) => event.id === snapshot.event.id)) return current;
           next = { ...current, events: [snapshot.event, ...current.events] };
         } else {
           if (current.objectGraph.objects.some((object) => object.id === snapshot.object.id)) return current;
-          let objectGraph = addGraphObject(current.objectGraph, {
+          const objectGraph = addGraphObject(current.objectGraph, {
             ...snapshot.object,
             status: snapshot.object.status === "deleted" ? "active" : snapshot.object.status,
             deletedAt: null
           });
-          for (const relation of snapshot.relations) {
-            const ids = new Set(objectGraph.objects.map((object) => object.id));
-            if (!ids.has(relation.fromId) || !ids.has(relation.toId)) continue;
-            try {
-              objectGraph = addGraphRelation(objectGraph, relation, { now: relation.createdAt });
-            } catch {
-              // A relation can remain absent if its other endpoint was removed independently.
-            }
-          }
           next = {
             ...current,
             objectGraph
           };
+          next = restoreCapturedRelations(next, snapshot.relations).state;
+          next = retryPendingRelations(next).state;
         }
 
         restored = true;
@@ -1938,6 +1999,9 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       removeObject,
       addObjectRelation,
       removeObjectRelation,
+      reconcileDocumentRelations,
+      bindDocumentReference,
+      rebindDocumentReference,
       addTask,
       updateTask,
       toggleTask,
@@ -1997,6 +2061,9 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       removeObject,
       addObjectRelation,
       removeObjectRelation,
+      reconcileDocumentRelations,
+      bindDocumentReference,
+      rebindDocumentReference,
       addTask,
       updateTask,
       toggleTask,

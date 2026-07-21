@@ -59,9 +59,9 @@ function legacyV14State(): any {
   };
 }
 
-describe("storage migration v15", () => {
+describe("storage migration v16", () => {
   it("rejects an unknown future version instead of silently downgrading it", () => {
-    expect(() => migrateState({ ...createInitialState(), version: 16 } as never))
+    expect(() => migrateState({ ...createInitialState(), version: 17 } as never))
       .toThrow("Неподдерживаемая версия");
   });
 
@@ -120,7 +120,7 @@ describe("storage migration v15", () => {
       updatedAt: stamp
     });
 
-    expect(migrated.version).toBe(15);
+    expect(migrated.version).toBe(16);
     expect(migrated.notes).toEqual([]);
     expect(reflectionDocuments(migrated.notes)).toEqual([]);
     expect(migrated.trash).toEqual([]);

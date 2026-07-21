@@ -23,6 +23,23 @@ import {
 type DocumentState = Pick<DashboardState, "notes" | "readingItems" | "objectGraph">;
 type NativeObjectPatch = Partial<Pick<UniversalObject, "title" | "blocks" | "properties" | "status">>;
 
+export function listDocumentRecords(state: DocumentState): readonly DocumentRecord[] {
+  return [
+    ...state.notes.map(documentFromNote),
+    ...state.objectGraph.objects
+      .filter((object) =>
+        object.roles.includes("document") &&
+        object.status !== "archived" &&
+        object.status !== "deleted"
+      )
+      .flatMap((object) => {
+        const document = documentFromNativeObject(object);
+        return document ? [document] : [];
+      }),
+    ...state.readingItems.map(documentFromReadingItem)
+  ];
+}
+
 export interface DocumentRepositoryDependencies {
   /** Returns the current canonical snapshot for every repository operation. */
   readonly getState: () => DocumentState;
@@ -45,6 +62,12 @@ export type DocumentCreateResult =
   | { readonly status: "created"; readonly id: DocumentId; readonly document: DocumentRecord }
   | { readonly status: "command-rejected"; readonly message: string };
 
+export interface DocumentReferenceUpdateSummary {
+  readonly updatedSources: readonly string[];
+  readonly skippedSources: readonly { readonly id: string; readonly reason: string }[];
+  readonly rejectedSources: readonly { readonly id: string; readonly reason: string }[];
+}
+
 /** Accepted means the current canonical delete command accepted the routed request. */
 export type DocumentDeleteResult =
   | { readonly status: "accepted"; readonly id: DocumentId }
@@ -55,7 +78,12 @@ export type DocumentDeleteResult =
   | { readonly status: "command-rejected"; readonly id: DocumentId; readonly message: string };
 
 export type DocumentUpdateResult =
-  | { readonly status: "accepted"; readonly id: DocumentId; readonly source: DocumentSource }
+  | {
+      readonly status: "accepted";
+      readonly id: DocumentId;
+      readonly source: DocumentSource;
+      readonly referenceUpdate?: DocumentReferenceUpdateSummary;
+    }
   | { readonly status: "not-found"; readonly id: DocumentId; readonly source: DocumentSource }
   | { readonly status: "not-document"; readonly id: DocumentId; readonly source: Extract<DocumentSource, { kind: "native" }> }
   | { readonly status: "invalid-id"; readonly reference: string }
@@ -149,21 +177,7 @@ export function createDocumentRepository(
   };
 
   const listDocuments = (): readonly DocumentRecord[] => {
-    const state = dependencies.getState();
-    return [
-      ...state.notes.map(documentFromNote),
-      ...state.objectGraph.objects
-        .filter((object) =>
-          object.roles.includes("document") &&
-          object.status !== "archived" &&
-          object.status !== "deleted"
-        )
-        .flatMap((object) => {
-          const document = documentFromNativeObject(object);
-          return document ? [document] : [];
-        }),
-      ...state.readingItems.map(documentFromReadingItem)
-    ];
+    return listDocumentRecords(dependencies.getState());
   };
 
   const updateDocument = (id: DocumentId, patch: DocumentPatch): DocumentUpdateResult => {

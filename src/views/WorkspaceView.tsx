@@ -19,8 +19,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
 import { DocumentLinksPanel } from "../components/DocumentLinksPanel";
 import { hasReflectionTag } from "../domain/documents/documentContract";
-import { buildDocumentWikiLinkIndex, normalizeDocumentWikiTitle } from "../domain/documents/documentWikiLinks";
+import { normalizeDocumentWikiTitle, parseDocumentWikiReferences } from "../domain/documents/documentWikiLinks";
 import { useDocumentRepository } from "../hooks/useDocumentRepository";
+import { useRelationRepository } from "../hooks/useRelationRepository";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
 
@@ -54,11 +55,12 @@ function formatDocumentDate(value: string): string {
 export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   const { state, saving } = useDashboard();
   const documentRepository = useDocumentRepository();
+  const relationRepository = useRelationRepository();
   const { navigate } = useAppNavigation();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<WorkspaceFilter>("all");
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [linkChooserOpen, setLinkChooserOpen] = useState(false);
+  const [referenceChooser, setReferenceChooser] = useState<"link" | "embed" | null>(null);
   const [linkQuery, setLinkQuery] = useState("");
   const [mobilePanel, setMobilePanel] = useState<"library" | "editor">(
     documentId ? "editor" : "library"
@@ -74,7 +76,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       Number(right.pinned) - Number(left.pinned) ||
       right.updatedAt.localeCompare(left.updatedAt)
     ), [documentRepository, state]);
-  const wikiLinkIndex = useMemo(() => buildDocumentWikiLinkIndex(documents), [documents]);
+  const wikiLinkIndex = relationRepository.index;
 
   const selected = documents.find((document) => document.id === documentId) ?? null;
 
@@ -117,7 +119,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   useEffect(() => {
     setTagsDraft(selected?.tags.join(", ") ?? "");
     setInspectorOpen(false);
-    setLinkChooserOpen(false);
+    setReferenceChooser(null);
     setLinkQuery("");
   }, [selected?.id]);
 
@@ -184,16 +186,21 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
     documentRepository.updateDocument(selected.id, { content: body });
   };
 
-  const insertDocumentLink = (target: (typeof documents)[number]) => {
+  const insertDocumentReference = (target: (typeof documents)[number]) => {
     if (!selected || !selected.capabilities.canEditContent) return;
     const textarea = bodyRef.current;
     const start = textarea?.selectionStart ?? selected.content.length;
     const end = textarea?.selectionEnd ?? start;
-    const token = `[[${target.title}]]`;
+    const kind = referenceChooser ?? "link";
+    const token = `${kind === "embed" ? "!" : ""}[[${target.title}]]`;
     const content = `${selected.content.slice(0, start)}${token}${selected.content.slice(end)}`;
     pendingCursorRef.current = start + token.length;
     documentRepository.updateDocument(selected.id, { content });
-    setLinkChooserOpen(false);
+    const inserted = parseDocumentWikiReferences(content).find((entry) =>
+      entry.start === start && entry.end === start + token.length && entry.kind === kind
+    );
+    if (inserted) relationRepository.bindDocumentReference(selected.id, target.id, inserted);
+    setReferenceChooser(null);
     setLinkQuery("");
   };
 
@@ -319,12 +326,23 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   {selected.capabilities.canEditContent ? (
                     <button
                       type="button"
-                      className={linkChooserOpen ? "is-active" : ""}
-                      onClick={() => setLinkChooserOpen((value) => !value)}
+                      className={referenceChooser === "link" ? "is-active" : ""}
+                      onClick={() => setReferenceChooser((value) => value === "link" ? null : "link")}
                       aria-label="Вставить ссылку"
                       title="Вставить ссылку"
                     >
                       <Link2 size={17} />
+                    </button>
+                  ) : null}
+                  {selected.capabilities.canEditContent ? (
+                    <button
+                      type="button"
+                      className={referenceChooser === "embed" ? "is-active" : ""}
+                      onClick={() => setReferenceChooser((value) => value === "embed" ? null : "embed")}
+                      aria-label="Встроить документ"
+                      title="Встроить документ"
+                    >
+                      <BookOpenText size={17} />
                     </button>
                   ) : null}
                   <button
@@ -371,14 +389,17 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                       ? <span className="is-reflection"><Sparkles size={12} /> осмысление</span>
                       : null}
                   </div>
-                  {linkChooserOpen ? (
-                    <section className="workspace-link-chooser" aria-label="Вставить ссылку">
-                      <header><strong>Вставить ссылку</strong><small>Выберите документ — вставим [[Название]] в позицию курсора.</small></header>
+                  {referenceChooser ? (
+                    <section className="workspace-link-chooser" aria-label={referenceChooser === "embed" ? "Встроить документ" : "Вставить ссылку"}>
+                      <header>
+                        <strong>{referenceChooser === "embed" ? "Встроить документ" : "Вставить ссылку"}</strong>
+                        <small>{referenceChooser === "embed" ? "Выберите документ — вставим ![[Название]] и покажем живое содержимое ниже." : "Выберите документ — вставим [[Название]] в позицию курсора."}</small>
+                      </header>
                       <input
                         value={linkQuery}
                         onChange={(event) => setLinkQuery(event.target.value)}
                         placeholder="Найти документ"
-                        aria-label="Найти документ для ссылки"
+                        aria-label="Найти документ"
                         autoFocus
                       />
                       <div>
@@ -386,7 +407,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                           <button
                             type="button"
                             key={document.id}
-                            onClick={() => insertDocumentLink(document)}
+                            onClick={() => insertDocumentReference(document)}
                           >
                             <span><strong>{document.title || "Без названия"}</strong><small>{document.kind === "material" ? "Материал" : "Документ"}</small></span>
                             {isAmbiguous ? <em>название не уникально</em> : null}
@@ -416,6 +437,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   ) : null}
                   <DocumentLinksPanel
                     document={selected}
+                    documents={documents}
                     index={wikiLinkIndex}
                     onOpenDocument={openDocumentById}
                   />
@@ -479,7 +501,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       </section>
 
       <p className="workspace-stage-note">
-        <BookOpenText size={15} /> «Осмысление» теперь только подборка документов. Следующий срез добавит мультимодальные блоки и встраивания прямо в это полотно.
+        <BookOpenText size={15} /> «Осмысление» — подборка документов. Ссылки и живые встраивания работают прямо в этом полотне; мультимодальные блоки появятся отдельным этапом.
       </p>
     </div>
   );

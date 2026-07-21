@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../../data/seed";
-import { addObjectRelation, addUniversalObject, createUniversalObject } from "./objectGraph";
+import { addUniversalObject, createUniversalObject } from "./objectGraph";
+import { addRelationToState } from "../relations/relationRepository";
 import {
   adaptLegacyObjects,
   buildObjectCatalog,
@@ -51,12 +52,14 @@ describe("адаптер старых данных", () => {
       now: state.updatedAt
     });
     state.objectGraph = addUniversalObject(state.objectGraph, document);
-    state.objectGraph = addObjectRelation(state.objectGraph, {
+    const added = addRelationToState(state, {
       id: "native-relation",
       kind: "contains",
       fromId: taskRef,
       toId: document.id
     }, { now: state.updatedAt });
+    if (added.result.status !== "accepted") throw new Error(added.result.message);
+    state.objectGraph = added.state.objectGraph;
 
     const catalog = buildObjectCatalog(state);
     expect(objectChildren(catalog, taskRef)).toEqual([

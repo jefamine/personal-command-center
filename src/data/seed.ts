@@ -92,7 +92,7 @@ export function createInitialState(): DashboardState {
   ];
 
   return {
-    version: 15,
+    version: 16,
     tasks,
     projects: [project],
     lifeAreas: [lifeArea, ...createLifeAreaTemplates(now, 1)],
@@ -107,6 +107,7 @@ export function createInitialState(): DashboardState {
     activityLog: [],
     trash: [],
     revisionHistory: [],
+    pendingRelations: [],
     objectGraph: createEmptyObjectGraph(),
     updatedAt: now
   };
