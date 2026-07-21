@@ -70,6 +70,7 @@ describe("document application contract", () => {
       capabilities: {
         canEdit: true,
         canEditContent: true,
+        canEditProject: true,
         canDelete: true,
         supportsSimpleTextEditing: true
       }
@@ -97,6 +98,7 @@ describe("document application contract", () => {
       contentStructure: { kind: "plain-text", blockCount: 1 },
       capabilities: {
         canEditContent: true,
+        canEditProject: false,
         supportsSimpleTextEditing: true
       }
     });
@@ -132,6 +134,7 @@ describe("document application contract", () => {
         canEdit: true,
         canEditTitle: true,
         canEditContent: false,
+        canEditProject: false,
         supportsSimpleTextEditing: false
       });
     }
@@ -154,6 +157,7 @@ describe("document application contract", () => {
         canEditTitle: false,
         canEditContent: false,
         canEditMetadata: false,
+        canEditProject: false,
         canDelete: false,
         supportsSimpleTextEditing: false
       }

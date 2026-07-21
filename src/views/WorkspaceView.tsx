@@ -18,18 +18,12 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
 import {
-  buildObjectCatalog,
-  legacyObjectReference,
-  parseLegacyObjectReference
-} from "../domain/objects/legacyAdapter";
-import {
-  createTextBlock,
-  type JsonValue,
-  type UniversalObject
-} from "../domain/objects/objectGraph";
+  noteDocumentId,
+  type DocumentRecord
+} from "../domain/documents/documentContract";
+import { createDocumentRepository } from "../domain/documents/documentRepository";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
-import type { Note, ReadingItem } from "../types";
 
 interface WorkspaceViewProps {
   documentId?: string;
@@ -37,22 +31,8 @@ interface WorkspaceViewProps {
 
 type WorkspaceFilter = "all" | "pinned" | "reflection" | "materials";
 
-interface WorkspaceDocument {
-  id: string;
-  rawId: string;
-  kind: "note" | "native" | "material";
-  title: string;
-  body: string;
-  tags: string[];
-  pinned: boolean;
+interface WorkspaceDocument extends DocumentRecord {
   isReflection: boolean;
-  editable: boolean;
-  projectId: string | null;
-  createdAt: string;
-  updatedAt: string;
-  object: UniversalObject;
-  note: Note | null;
-  material: ReadingItem | null;
 }
 
 const filters: Array<{ id: WorkspaceFilter; label: string }> = [
@@ -61,30 +41,6 @@ const filters: Array<{ id: WorkspaceFilter; label: string }> = [
   { id: "reflection", label: "Осмысление" },
   { id: "materials", label: "Материалы" }
 ];
-
-function objectBody(object: UniversalObject): string {
-  return object.blocks
-    .filter((block) => ["text", "heading", "quote"].includes(block.type))
-    .map((block) => block.text)
-    .join("\n\n");
-}
-
-function stringArrayProperty(value: JsonValue | undefined): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
-}
-
-function isSimpleTextDocument(object: UniversalObject): boolean {
-  return object.blocks.length <= 1 && object.blocks.every((block) => block.type === "text");
-}
-
-function simpleTextBlocks(object: UniversalObject, body: string) {
-  if (!isSimpleTextDocument(object)) return object.blocks;
-  return object.blocks.length
-    ? [{ ...object.blocks[0], text: body }]
-    : [createTextBlock(body)];
-}
 
 function documentPreview(body: string): string {
   return body.replace(/\s+/gu, " ").trim() || "Пустой документ";
@@ -121,55 +77,30 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const focusAfterCreateRef = useRef<string | null>(null);
-  const catalog = useMemo(() => buildObjectCatalog(state), [state]);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const documentRepository = useMemo(() => createDocumentRepository({
+    getState: () => stateRef.current,
+    updateNote,
+    updateNativeObject: updateObject
+  }), [updateNote, updateObject]);
+  const reflectionDocumentIds = useMemo(() => new Set(
+    state.notes
+      .filter((note) => Boolean(note.reflection) || note.origin === "reflection")
+      .map((note) => noteDocumentId(note.id))
+  ), [state.notes]);
 
-  const documents = useMemo<WorkspaceDocument[]>(() => catalog.objects
-    .filter((object) =>
-      object.roles.includes("document") &&
-      !["archived", "deleted"].includes(object.status)
-    )
-    .map((object) => {
-      const legacy = parseLegacyObjectReference(object.id);
-      const note = legacy?.type === "note"
-        ? state.notes.find((entry) => entry.id === legacy.rawId) ?? null
-        : null;
-      const material = legacy?.type === "reading"
-        ? state.readingItems.find((entry) => entry.id === legacy.rawId) ?? null
-        : null;
-      const tags = note?.tags ??
-        (material?.tags ?? stringArrayProperty(object.properties["document.tags"]));
-      const pinned = note?.pinned ??
-        (object.properties["document.pinned"] === true);
-      const isReflection = Boolean(note?.reflection) ||
-        note?.origin === "reflection" ||
-        tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление");
-      const kind: WorkspaceDocument["kind"] = note
-        ? "note"
-        : material
-          ? "material"
-          : "native";
-      return {
-        id: object.id,
-        rawId: legacy?.rawId ?? object.id,
-        kind,
-        title: object.title,
-        body: objectBody(object),
-        tags,
-        pinned,
-        isReflection,
-        editable: Boolean(note) || (object.source.kind === "native" && isSimpleTextDocument(object)),
-        projectId: note?.projectId ?? null,
-        createdAt: object.createdAt,
-        updatedAt: object.updatedAt,
-        object,
-        note,
-        material
-      };
-    })
+  const documents = useMemo<WorkspaceDocument[]>(() => documentRepository
+    .listDocuments()
+    .map((document) => ({
+      ...document,
+      isReflection: reflectionDocumentIds.has(document.id) ||
+        document.tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление")
+    }))
     .sort((left, right) =>
       Number(right.pinned) - Number(left.pinned) ||
       right.updatedAt.localeCompare(left.updatedAt)
-    ), [catalog.objects, state.notes, state.readingItems]);
+    ), [documentRepository, reflectionDocumentIds, state]);
 
   const selected = documents.find((document) => document.id === documentId) ?? null;
 
@@ -180,7 +111,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       if (filter === "reflection" && !document.isReflection) return false;
       if (filter === "materials" && document.kind !== "material") return false;
       if (!normalized) return true;
-      return `${document.title} ${document.body} ${document.tags.join(" ")}`
+      return `${document.title} ${document.content} ${document.tags.join(" ")}`
         .toLocaleLowerCase("ru")
         .includes(normalized);
     });
@@ -209,7 +140,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       focusAfterCreateRef.current = null;
       requestAnimationFrame(() => textarea.focus());
     }
-  }, [selected?.body, selected?.id, selected?.title]);
+  }, [selected?.content, selected?.id, selected?.title]);
 
   const openDocument = (document: WorkspaceDocument) => {
     setMobilePanel("editor");
@@ -221,7 +152,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
 
   const createDocument = () => {
     const note = addNote({ title: "Без названия", body: "" });
-    const id = legacyObjectReference("note", note.id);
+    const id = noteDocumentId(note.id);
     focusAfterCreateRef.current = id;
     setMobilePanel("editor");
     navigate(
@@ -235,55 +166,35 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
     navigate({ kind: "tool", tool: "workspace" }, { preserveTrail: true });
   };
 
-  const patchNative = (
-    document: WorkspaceDocument,
-    changes: Partial<Pick<UniversalObject, "title" | "blocks" | "properties" | "status">>
-  ) => {
-    const current = state.objectGraph.objects.find((object) => object.id === document.rawId);
-    if (!current) return;
-    updateObject(current.id, current.revision, changes);
-  };
-
   const updateTitle = (title: string) => {
-    if (!selected || !selected.editable) return;
-    if (selected.note) updateNote(selected.note.id, { title });
-    else patchNative(selected, { title });
+    if (!selected || !selected.capabilities.supportsSimpleTextEditing) return;
+    documentRepository.updateDocument(selected.id, { title });
   };
 
   const updateBody = (body: string) => {
-    if (!selected || !selected.editable) return;
-    if (selected.note) updateNote(selected.note.id, { body });
-    else patchNative(selected, { blocks: simpleTextBlocks(selected.object, body) });
+    if (!selected || !selected.capabilities.supportsSimpleTextEditing) return;
+    documentRepository.updateDocument(selected.id, { content: body });
   };
 
   const commitTags = () => {
-    if (!selected || selected.kind === "material") return;
+    if (!selected || !selected.capabilities.canEditMetadata) return;
     const tags = [...new Set(tagsDraft
       .split(",")
       .map((tag) => tag.trim())
       .filter(Boolean))];
-    if (selected.note) updateNote(selected.note.id, { tags });
-    else patchNative(selected, {
-      properties: { ...selected.object.properties, "document.tags": tags }
-    });
+    documentRepository.updateDocument(selected.id, { tags });
   };
 
   const togglePinned = () => {
-    if (!selected || selected.kind === "material") return;
-    if (selected.note) updateNote(selected.note.id, { pinned: !selected.pinned });
-    else patchNative(selected, {
-      properties: {
-        ...selected.object.properties,
-        "document.pinned": !selected.pinned
-      }
-    });
+    if (!selected || !selected.capabilities.canEditMetadata) return;
+    documentRepository.updateDocument(selected.id, { pinned: !selected.pinned });
   };
 
   const removeSelected = () => {
     if (!selected || selected.kind === "material") return;
     if (!window.confirm("Переместить документ в корзину? Его можно будет восстановить в настройках.")) return;
-    if (selected.note) removeNote(selected.note.id);
-    else removeObject(selected.rawId);
+    if (selected.source.kind === "note") removeNote(selected.source.entityId);
+    else if (selected.source.kind === "native") removeObject(selected.source.entityId);
     closeDocument();
   };
 
@@ -347,7 +258,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                 </span>
                 <span>
                   <strong>{document.title || "Без названия"}</strong>
-                  <small>{documentPreview(document.body)}</small>
+                  <small>{documentPreview(document.content)}</small>
                   <time>{formatDocumentDate(document.updatedAt)}</time>
                 </span>
                 {document.pinned ? <Pin size={12} className="workspace-list-pin" /> : null}
@@ -419,7 +330,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                     onChange={(event) => updateTitle(event.target.value)}
                     placeholder="Без названия"
                     aria-label="Название документа"
-                    readOnly={!selected.editable}
+                    readOnly={!selected.capabilities.supportsSimpleTextEditing}
                     rows={1}
                   />
                   <div className="workspace-document-meta">
@@ -432,15 +343,15 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   <textarea
                     ref={bodyRef}
                     className="workspace-document-body"
-                    value={selected.body}
+                    value={selected.content}
                     onChange={(event) => updateBody(event.target.value)}
                     placeholder="Начните писать…"
                     aria-label="Текст документа"
-                    readOnly={!selected.editable}
+                    readOnly={!selected.capabilities.supportsSimpleTextEditing}
                     rows={1}
                     spellCheck
                   />
-                  {!selected.editable ? (
+                  {!selected.capabilities.supportsSimpleTextEditing ? (
                     <p className="workspace-readonly-note">
                       {selected.kind === "material"
                         ? "Материал открыт для чтения. Связи и исходные данные доступны через кнопку вверху."
@@ -468,16 +379,18 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                           }
                         }}
                         placeholder="идея, семья, осмысление"
-                        disabled={selected.kind === "material"}
+                        disabled={!selected.capabilities.canEditMetadata}
                       />
                       <small>Тег «осмысление» добавляет документ в соответствующую подборку.</small>
                     </label>
-                    {selected.note ? (
+                    {selected.capabilities.canEditProject ? (
                       <label>
                         <span>Проект</span>
                         <select
                           value={selected.projectId ?? ""}
-                          onChange={(event) => updateNote(selected.note!.id, { projectId: event.target.value || null })}
+                          onChange={(event) => documentRepository.updateDocument(selected.id, {
+                            projectId: event.target.value || null
+                          })}
                         >
                           <option value="">Без проекта</option>
                           {state.projects.map((project) => <option value={project.id} key={project.id}>{project.title}</option>)}
@@ -487,7 +400,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                     <dl>
                       <div><dt>Создан</dt><dd>{formatDocumentDate(selected.createdAt)}</dd></div>
                       <div><dt>Изменён</dt><dd>{formatDocumentDate(selected.updatedAt)}</dd></div>
-                      <div><dt>Источник</dt><dd>{selected.kind === "native" ? "Объектное ядро" : selected.kind === "material" ? "Материалы" : "Рабочее пространство"}</dd></div>
+                      <div><dt>Источник</dt><dd>{selected.kind === "material" ? "Материалы" : "Рабочее пространство"}</dd></div>
                     </dl>
                   </div>
                 </aside>

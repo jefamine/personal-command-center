@@ -40,6 +40,7 @@ export interface DocumentCapabilities {
   readonly canEditTitle: boolean;
   readonly canEditContent: boolean;
   readonly canEditMetadata: boolean;
+  readonly canEditProject: boolean;
   readonly canDelete: boolean;
   /** The current single-textarea editor can save the content without flattening blocks. */
   readonly supportsSimpleTextEditing: boolean;
@@ -102,11 +103,22 @@ export type DocumentLookupResult =
     }
   | { readonly status: "invalid-id"; readonly reference: string };
 
-const editableTextCapabilities: DocumentCapabilities = {
+const editableNoteCapabilities: DocumentCapabilities = {
   canEdit: true,
   canEditTitle: true,
   canEditContent: true,
   canEditMetadata: true,
+  canEditProject: true,
+  canDelete: true,
+  supportsSimpleTextEditing: true
+};
+
+const editableNativeCapabilities: DocumentCapabilities = {
+  canEdit: true,
+  canEditTitle: true,
+  canEditContent: true,
+  canEditMetadata: true,
+  canEditProject: false,
   canDelete: true,
   supportsSimpleTextEditing: true
 };
@@ -116,6 +128,7 @@ const structuredNativeCapabilities: DocumentCapabilities = {
   canEditTitle: true,
   canEditContent: false,
   canEditMetadata: true,
+  canEditProject: false,
   canDelete: true,
   supportsSimpleTextEditing: false
 };
@@ -125,6 +138,7 @@ const readOnlyMaterialCapabilities: DocumentCapabilities = {
   canEditTitle: false,
   canEditContent: false,
   canEditMetadata: false,
+  canEditProject: false,
   canDelete: false,
   supportsSimpleTextEditing: false
 };
@@ -206,7 +220,7 @@ export function documentFromNote(note: Note): DocumentRecord {
       blockCount: note.body ? 1 : 0,
       blockTypes: note.body ? ["text"] : []
     },
-    capabilities: editableTextCapabilities
+    capabilities: editableNoteCapabilities
   };
 }
 
@@ -230,7 +244,7 @@ export function documentFromNativeObject(object: UniversalObject): DocumentRecor
       blockCount: object.blocks.length,
       blockTypes: object.blocks.map((block) => block.type)
     },
-    capabilities: simple ? editableTextCapabilities : structuredNativeCapabilities
+    capabilities: simple ? editableNativeCapabilities : structuredNativeCapabilities
   };
 }
 
