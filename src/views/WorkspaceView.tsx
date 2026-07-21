@@ -17,10 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
-import {
-  noteDocumentId,
-  type DocumentRecord
-} from "../domain/documents/documentContract";
+import { noteDocumentId } from "../domain/documents/documentContract";
 import { createDocumentRepository } from "../domain/documents/documentRepository";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
@@ -30,10 +27,6 @@ interface WorkspaceViewProps {
 }
 
 type WorkspaceFilter = "all" | "pinned" | "reflection" | "materials";
-
-interface WorkspaceDocument extends DocumentRecord {
-  isReflection: boolean;
-}
 
 const filters: Array<{ id: WorkspaceFilter; label: string }> = [
   { id: "all", label: "Все" },
@@ -84,23 +77,12 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
     updateNote,
     updateNativeObject: updateObject
   }), [updateNote, updateObject]);
-  const reflectionDocumentIds = useMemo(() => new Set(
-    state.notes
-      .filter((note) => Boolean(note.reflection) || note.origin === "reflection")
-      .map((note) => noteDocumentId(note.id))
-  ), [state.notes]);
-
-  const documents = useMemo<WorkspaceDocument[]>(() => documentRepository
-    .listDocuments()
-    .map((document) => ({
-      ...document,
-      isReflection: reflectionDocumentIds.has(document.id) ||
-        document.tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление")
-    }))
+  const documents = useMemo(() => [...documentRepository
+    .listDocuments()]
     .sort((left, right) =>
       Number(right.pinned) - Number(left.pinned) ||
       right.updatedAt.localeCompare(left.updatedAt)
-    ), [documentRepository, reflectionDocumentIds, state]);
+    ), [documentRepository, state]);
 
   const selected = documents.find((document) => document.id === documentId) ?? null;
 
@@ -142,7 +124,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
     }
   }, [selected?.content, selected?.id, selected?.title]);
 
-  const openDocument = (document: WorkspaceDocument) => {
+  const openDocument = (document: (typeof documents)[number]) => {
     setMobilePanel("editor");
     navigate(
       { kind: "tool", tool: "workspace", documentId: document.id },
@@ -336,7 +318,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   <div className="workspace-document-meta">
                     <time>{formatDocumentDate(selected.updatedAt)}</time>
                     {selected.tags.slice(0, 4).map((tag) => <span key={tag}>#{tag}</span>)}
-                    {selected.isReflection && !selected.tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление")
+                    {selected.isReflection
                       ? <span className="is-reflection"><Sparkles size={12} /> осмысление</span>
                       : null}
                   </div>

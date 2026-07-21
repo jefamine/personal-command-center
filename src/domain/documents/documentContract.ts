@@ -66,9 +66,11 @@ export interface DocumentRecord {
    * For a structured document it is only a text projection for reading,
    * searching, and previewing. The projection must never be written back in
    * place of the original structured blocks.
-   */
+  */
   readonly content: string;
   readonly tags: readonly string[];
+  /** Computed reflection facet; it is never persisted as separate document data. */
+  readonly isReflection: boolean;
   readonly pinned: boolean;
   readonly projectId: string | null;
   readonly createdAt: string;
@@ -153,6 +155,10 @@ function stringArrayProperty(value: JsonValue | undefined): string[] {
     : [];
 }
 
+export function hasReflectionTag(tags: readonly string[]): boolean {
+  return tags.some((tag) => tag.trim().toLocaleLowerCase("ru") === "осмысление");
+}
+
 function nativeContent(object: UniversalObject): string {
   return object.blocks
     .filter((block) => ["text", "heading", "quote"].includes(block.type))
@@ -211,6 +217,7 @@ export function documentFromNote(note: Note): DocumentRecord {
     title: note.title,
     content: note.body,
     tags: [...note.tags],
+    isReflection: Boolean(note.reflection) || note.origin === "reflection" || hasReflectionTag(note.tags),
     pinned: note.pinned,
     projectId: note.projectId,
     createdAt: note.createdAt,
@@ -228,13 +235,15 @@ export function documentFromNativeObject(object: UniversalObject): DocumentRecor
   const id = object.source.kind === "native" ? nativeDocumentId(object.id) : null;
   if (!id || !object.roles.includes("document")) return null;
   const simple = hasSimpleDocumentContent(object);
+  const tags = stringArrayProperty(object.properties["document.tags"]);
   return {
     id,
     source: { kind: "native", entityId: object.id },
     kind: "document",
     title: object.title,
     content: nativeContent(object),
-    tags: stringArrayProperty(object.properties["document.tags"]),
+    tags,
+    isReflection: hasReflectionTag(tags),
     pinned: object.properties["document.pinned"] === true,
     projectId: null,
     createdAt: object.createdAt,
@@ -256,6 +265,7 @@ export function documentFromReadingItem(item: ReadingItem): DocumentRecord {
     title: item.title,
     content: [item.summary, item.body].filter(Boolean).join("\n\n"),
     tags: [...item.tags],
+    isReflection: hasReflectionTag(item.tags),
     pinned: false,
     projectId: null,
     createdAt: item.createdAt,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../../data/seed";
+import { createReflectionMetadata } from "../reflections/reflectionNote";
 import { noteTrashEntry } from "../safety/dataSafety";
 import {
   createTextBlock,
@@ -65,6 +66,7 @@ describe("document application contract", () => {
       title: note.title,
       content: note.body,
       tags: note.tags,
+      isReflection: false,
       pinned: true,
       projectId: note.projectId,
       capabilities: {
@@ -94,6 +96,7 @@ describe("document application contract", () => {
       source: { kind: "native", entityId: object.id },
       content: "Содержание",
       tags: ["native"],
+      isReflection: false,
       pinned: true,
       contentStructure: { kind: "plain-text", blockCount: 1 },
       capabilities: {
@@ -152,6 +155,7 @@ describe("document application contract", () => {
       title: item.title,
       content: "Краткое описание\n\nОсновной текст",
       tags: item.tags,
+      isReflection: false,
       capabilities: {
         canEdit: false,
         canEditTitle: false,
@@ -162,6 +166,26 @@ describe("document application contract", () => {
         supportsSimpleTextEditing: false
       }
     });
+  });
+
+  it("computes the reflection facet from Note metadata, origin and normalized tags", () => {
+    expect(documentFromNote(noteFixture({ reflection: createReflectionMetadata() })).isReflection)
+      .toBe(true);
+    expect(documentFromNote(noteFixture({ origin: "reflection" })).isReflection).toBe(true);
+    expect(documentFromNote(noteFixture({ tags: ["  ОСМЫСЛЕНИЕ  "] })).isReflection).toBe(true);
+    expect(documentFromNote(noteFixture({ tags: ["обычный"] })).isReflection).toBe(false);
+  });
+
+  it("computes native documents and materials reflection only from their own tags", () => {
+    const native = createUniversalObject({
+      id: "native-reflection",
+      roles: ["document"],
+      properties: { "document.tags": [" ОсМыСлЕнИе "] }
+    }, { now });
+    const material = materialFixture({ tags: ["ОСМЫСЛЕНИЕ"] });
+
+    expect(documentFromNativeObject(native)?.isReflection).toBe(true);
+    expect(documentFromReadingItem(material).isReflection).toBe(true);
   });
 
   it("keeps document ids tied to one source without creating a source copy", () => {
