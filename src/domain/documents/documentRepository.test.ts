@@ -8,6 +8,7 @@ import {
   type UniversalObject
 } from "../objects/objectGraph";
 import {
+  documentFromNote,
   materialDocumentId,
   nativeDocumentId,
   noteDocumentId,
@@ -81,28 +82,173 @@ function repositoryFor(
   state: DashboardState,
   overrides: Partial<DocumentRepositoryDependencies> = {}
 ) {
+  const noteCreates: Array<Parameters<DocumentRepositoryDependencies["addNote"]>[0]> = [];
   const noteUpdates: Array<{ id: string; changes: NoteUpdate }> = [];
+  const noteRemovals: string[] = [];
   const nativeUpdates: Array<{
     id: string;
     expectedRevision: number;
     changes: Parameters<DocumentRepositoryDependencies["updateNativeObject"]>[2];
   }> = [];
+  const nativeRemovals: string[] = [];
   const dependencies: DocumentRepositoryDependencies = {
     getState: () => state,
+    addNote: (draft) => {
+      noteCreates.push(draft);
+      return noteFixture({
+        id: "canonical-note-id",
+        title: draft.title,
+        body: draft.body ?? "",
+        projectId: draft.projectId ?? null,
+        tags: draft.tags ? [...draft.tags] : [],
+        pinned: draft.pinned ?? false
+      });
+    },
     updateNote: (id, changes) => { noteUpdates.push({ id, changes }); },
     updateNativeObject: (id, expectedRevision, changes) => {
       nativeUpdates.push({ id, expectedRevision, changes });
     },
+    removeNote: (id) => { noteRemovals.push(id); },
+    removeNativeObject: (id) => { nativeRemovals.push(id); },
     ...overrides
   };
   return {
     repository: createDocumentRepository(dependencies),
+    noteCreates,
     noteUpdates,
-    nativeUpdates
+    noteRemovals,
+    nativeUpdates,
+    nativeRemovals
   };
 }
 
 describe("transitional document repository", () => {
+  it("creates exactly one canonical Note from a DocumentDraft without generating an id", () => {
+    const state = stateFixture();
+    const draft = {
+      title: "Новый документ",
+      content: "Текст",
+      tags: ["черновик"],
+      pinned: true,
+      projectId: "project-1"
+    };
+    const { repository, noteCreates } = repositoryFor(state);
+
+    const result = repository.createDocument(draft);
+
+    expect(noteCreates).toEqual([{
+      title: "Новый документ",
+      body: "Текст",
+      tags: ["черновик"],
+      pinned: true,
+      projectId: "project-1"
+    }]);
+    expect(result).toEqual({
+      status: "created",
+      id: noteDocumentId("canonical-note-id"),
+      document: documentFromNote(noteFixture({
+        id: "canonical-note-id",
+        title: "Новый документ",
+        body: "Текст",
+        tags: ["черновик"],
+        pinned: true
+      }))
+    });
+    expect(draft).toEqual({
+      title: "Новый документ",
+      content: "Текст",
+      tags: ["черновик"],
+      pinned: true,
+      projectId: "project-1"
+    });
+  });
+
+  it("returns command-rejected when canonical Note creation throws", () => {
+    const { repository } = repositoryFor(stateFixture(), {
+      addNote: () => { throw new Error("Создание отклонено."); }
+    });
+
+    expect(repository.createDocument({ title: "Новый документ" }))
+      .toEqual({ status: "command-rejected", message: "Создание отклонено." });
+  });
+
+  it("routes Note deletion only to removeNote and leaves the snapshot untouched", () => {
+    const state = stateFixture();
+    const note = noteFixture();
+    state.notes = [note];
+    const before = JSON.stringify(state);
+    const { repository, noteRemovals, nativeRemovals } = repositoryFor(state);
+
+    expect(repository.deleteDocument(noteDocumentId(note.id)))
+      .toEqual({ status: "accepted", id: noteDocumentId(note.id) });
+    expect(noteRemovals).toEqual([note.id]);
+    expect(nativeRemovals).toEqual([]);
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("routes native document deletion only to removeNativeObject", () => {
+    const state = stateFixture();
+    const native = nativeFixture();
+    state.objectGraph.objects = [native];
+    const { repository, noteRemovals, nativeRemovals } = repositoryFor(state);
+
+    expect(repository.deleteDocument(nativeDocumentId(native.id)!))
+      .toEqual({ status: "accepted", id: nativeDocumentId(native.id) });
+    expect(noteRemovals).toEqual([]);
+    expect(nativeRemovals).toEqual([native.id]);
+  });
+
+  it("keeps materials read-only and rejects missing, non-document and invalid deletion ids", () => {
+    const state = stateFixture();
+    const material = materialFixture();
+    const nativeTask = nativeFixture({ id: "native-task", roles: ["task"] });
+    state.readingItems = [material];
+    state.objectGraph.objects = [nativeTask];
+    const { repository, noteRemovals, nativeRemovals } = repositoryFor(state);
+
+    expect(repository.deleteDocument(materialDocumentId(material.id)))
+      .toEqual({ status: "read-only", id: materialDocumentId(material.id) });
+    expect(repository.deleteDocument(noteDocumentId("missing")))
+      .toEqual({ status: "not-found", id: noteDocumentId("missing") });
+    expect(repository.deleteDocument(nativeDocumentId(nativeTask.id)!))
+      .toEqual({ status: "not-document", id: nativeDocumentId(nativeTask.id) });
+    expect(repository.deleteDocument("" as ReturnType<typeof noteDocumentId>))
+      .toEqual({ status: "invalid-id", reference: "" });
+    expect(noteRemovals).toEqual([]);
+    expect(nativeRemovals).toEqual([]);
+  });
+
+  it("keeps same raw ids routed to their distinct physical delete commands", () => {
+    const state = stateFixture();
+    const note = noteFixture({ id: "shared" });
+    const native = nativeFixture({ id: "shared" });
+    state.notes = [note];
+    state.objectGraph.objects = [native];
+    const { repository, noteRemovals, nativeRemovals } = repositoryFor(state);
+
+    repository.deleteDocument(noteDocumentId("shared"));
+    repository.deleteDocument(nativeDocumentId("shared")!);
+
+    expect(noteRemovals).toEqual(["shared"]);
+    expect(nativeRemovals).toEqual(["shared"]);
+  });
+
+  it("returns command-rejected when a canonical delete command throws", () => {
+    const state = stateFixture();
+    const note = noteFixture();
+    state.notes = [note];
+    const { repository } = repositoryFor(state, {
+      removeNote: () => { throw new Error("Удаление отклонено."); }
+    });
+
+    expect(repository.deleteDocument(noteDocumentId(note.id)))
+      .toEqual({
+        status: "command-rejected",
+        id: noteDocumentId(note.id),
+        message: "Удаление отклонено."
+      });
+  });
+
   it("lists one Note, native document and material without source copies", () => {
     const state = stateFixture();
     const note = noteFixture();

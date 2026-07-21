@@ -1,4 +1,4 @@
-import type { DashboardState, NoteUpdate } from "../../types";
+import type { DashboardState, Note, NoteUpdate } from "../../types";
 import {
   createTextBlock,
   ObjectGraphError,
@@ -8,8 +8,11 @@ import {
   documentFromNativeObject,
   documentFromNote,
   documentFromReadingItem,
+  documentDraftToNoteDraft,
   hasSimpleDocumentContent,
+  noteDocumentId,
   resolveDocument,
+  type DocumentDraft,
   type DocumentId,
   type DocumentLookupResult,
   type DocumentPatch,
@@ -23,6 +26,8 @@ type NativeObjectPatch = Partial<Pick<UniversalObject, "title" | "blocks" | "pro
 export interface DocumentRepositoryDependencies {
   /** Returns the current canonical snapshot for every repository operation. */
   readonly getState: () => DocumentState;
+  /** Existing canonical creation command; it owns Note identity and activity logging. */
+  readonly addNote: (draft: ReturnType<typeof documentDraftToNoteDraft>) => Note;
   /** Existing canonical Note command; it owns Note revisions and side effects. */
   readonly updateNote: (id: string, changes: NoteUpdate) => void;
   /** Existing canonical native-object command; it owns revision checks and history. */
@@ -31,7 +36,23 @@ export interface DocumentRepositoryDependencies {
     expectedRevision: number,
     changes: NativeObjectPatch
   ) => void;
+  /** Existing canonical commands; they own trash snapshots, relations and activity logging. */
+  readonly removeNote: (id: string) => void;
+  readonly removeNativeObject: (id: string) => void;
 }
+
+export type DocumentCreateResult =
+  | { readonly status: "created"; readonly id: DocumentId; readonly document: DocumentRecord }
+  | { readonly status: "command-rejected"; readonly message: string };
+
+/** Accepted means the current canonical delete command accepted the routed request. */
+export type DocumentDeleteResult =
+  | { readonly status: "accepted"; readonly id: DocumentId }
+  | { readonly status: "not-found"; readonly id: DocumentId }
+  | { readonly status: "not-document"; readonly id: DocumentId }
+  | { readonly status: "invalid-id"; readonly reference: string }
+  | { readonly status: "read-only"; readonly id: DocumentId }
+  | { readonly status: "command-rejected"; readonly id: DocumentId; readonly message: string };
 
 export type DocumentUpdateResult =
   | { readonly status: "accepted"; readonly id: DocumentId; readonly source: DocumentSource }
@@ -47,7 +68,9 @@ export type DocumentUpdateResult =
 export interface DocumentRepository {
   getDocument(reference: string): DocumentLookupResult;
   listDocuments(): readonly DocumentRecord[];
+  createDocument(draft: DocumentDraft): DocumentCreateResult;
   updateDocument(id: DocumentId, patch: DocumentPatch): DocumentUpdateResult;
+  deleteDocument(id: DocumentId): DocumentDeleteResult;
 }
 
 function hasOwn(value: object, key: string): boolean {
@@ -73,7 +96,7 @@ function simpleTextBlocks(object: UniversalObject, content: string) {
 }
 
 function commandMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Каноническая команда отклонила обновление документа.";
+  return error instanceof Error ? error.message : "Каноническая команда отклонила операцию с документом.";
 }
 
 function updateFailure(
@@ -93,6 +116,14 @@ function updateLookupFailure(result: Exclude<DocumentLookupResult, { readonly st
   return result;
 }
 
+function deleteLookupFailure(
+  result: Exclude<DocumentLookupResult, { readonly status: "found" }>
+): DocumentDeleteResult {
+  if (result.status === "invalid-id") return result;
+  if (result.status === "not-document") return { status: "not-document", id: result.id };
+  return { status: "not-found", id: result.id };
+}
+
 /**
  * Transitional application repository over existing canonical document sources.
  * It computes DocumentRecord values and routes writes to existing commands; it
@@ -103,6 +134,19 @@ export function createDocumentRepository(
 ): DocumentRepository {
   const getDocument = (reference: string): DocumentLookupResult =>
     resolveDocument(dependencies.getState(), reference);
+
+  const createDocument = (draft: DocumentDraft): DocumentCreateResult => {
+    try {
+      const note = dependencies.addNote(documentDraftToNoteDraft(draft));
+      return {
+        status: "created",
+        id: noteDocumentId(note.id),
+        document: documentFromNote(note)
+      };
+    } catch (error) {
+      return { status: "command-rejected", message: commandMessage(error) };
+    }
+  };
 
   const listDocuments = (): readonly DocumentRecord[] => {
     const state = dependencies.getState();
@@ -176,5 +220,24 @@ export function createDocumentRepository(
     }
   };
 
-  return { getDocument, listDocuments, updateDocument };
+  const deleteDocument = (id: DocumentId): DocumentDeleteResult => {
+    const resolved = resolveDocument(dependencies.getState(), id);
+    if (resolved.status !== "found") return deleteLookupFailure(resolved);
+
+    const document = resolved.document;
+    if (document.source.kind === "material") return { status: "read-only", id };
+
+    try {
+      if (document.source.kind === "note") {
+        dependencies.removeNote(document.source.entityId);
+      } else {
+        dependencies.removeNativeObject(document.source.entityId);
+      }
+      return { status: "accepted", id };
+    } catch (error) {
+      return { status: "command-rejected", id, message: commandMessage(error) };
+    }
+  };
+
+  return { getDocument, listDocuments, createDocument, updateDocument, deleteDocument };
 }

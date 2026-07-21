@@ -17,10 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
-import {
-  hasReflectionTag,
-  noteDocumentId
-} from "../domain/documents/documentContract";
+import { hasReflectionTag } from "../domain/documents/documentContract";
 import { createDocumentRepository } from "../domain/documents/documentRepository";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
@@ -77,9 +74,12 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   stateRef.current = state;
   const documentRepository = useMemo(() => createDocumentRepository({
     getState: () => stateRef.current,
+    addNote,
     updateNote,
-    updateNativeObject: updateObject
-  }), [updateNote, updateObject]);
+    updateNativeObject: updateObject,
+    removeNote,
+    removeNativeObject: removeObject
+  }), [addNote, removeNote, removeObject, updateNote, updateObject]);
   const documents = useMemo(() => [...documentRepository
     .listDocuments()]
     .sort((left, right) =>
@@ -136,12 +136,12 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   };
 
   const createDocument = () => {
-    const note = addNote({ title: "Без названия", body: "" });
-    const id = noteDocumentId(note.id);
-    focusAfterCreateRef.current = id;
+    const result = documentRepository.createDocument({ title: "Без названия", content: "" });
+    if (result.status !== "created") return;
+    focusAfterCreateRef.current = result.id;
     setMobilePanel("editor");
     navigate(
-      { kind: "tool", tool: "workspace", documentId: id },
+      { kind: "tool", tool: "workspace", documentId: result.id },
       { preserveTrail: true, label: "Новый документ" }
     );
   };
@@ -176,11 +176,10 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   };
 
   const removeSelected = () => {
-    if (!selected || selected.kind === "material") return;
+    if (!selected || !selected.capabilities.canDelete) return;
     if (!window.confirm("Переместить документ в корзину? Его можно будет восстановить в настройках.")) return;
-    if (selected.source.kind === "note") removeNote(selected.source.entityId);
-    else if (selected.source.kind === "native") removeObject(selected.source.entityId);
-    closeDocument();
+    const result = documentRepository.deleteDocument(selected.id);
+    if (result.status === "accepted") closeDocument();
   };
 
   return (
@@ -276,7 +275,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   </span>
                 </div>
                 <div>
-                  {selected.kind !== "material" ? (
+                  {selected.capabilities.canEditMetadata ? (
                     <button type="button" onClick={togglePinned} aria-label={selected.pinned ? "Открепить" : "Закрепить"} title={selected.pinned ? "Открепить" : "Закрепить"}>
                       {selected.pinned ? <PinOff size={17} /> : <Pin size={17} />}
                     </button>
@@ -298,7 +297,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   >
                     <ArrowUpRight size={17} />
                   </AppLink>
-                  {selected.kind !== "material" ? (
+                  {selected.capabilities.canDelete ? (
                     <button type="button" className="is-danger" onClick={removeSelected} aria-label="В корзину" title="В корзину">
                       <Trash2 size={17} />
                     </button>
