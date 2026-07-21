@@ -66,7 +66,7 @@ export interface DocumentRecord {
    * For a structured document it is only a text projection for reading,
    * searching, and previewing. The projection must never be written back in
    * place of the original structured blocks.
-  */
+   */
   readonly content: string;
   readonly tags: readonly string[];
   /** Computed reflection facet; it is never persisted as separate document data. */

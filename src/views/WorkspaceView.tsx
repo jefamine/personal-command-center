@@ -17,7 +17,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
-import { noteDocumentId } from "../domain/documents/documentContract";
+import {
+  hasReflectionTag,
+  noteDocumentId
+} from "../domain/documents/documentContract";
 import { createDocumentRepository } from "../domain/documents/documentRepository";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
@@ -318,7 +321,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                   <div className="workspace-document-meta">
                     <time>{formatDocumentDate(selected.updatedAt)}</time>
                     {selected.tags.slice(0, 4).map((tag) => <span key={tag}>#{tag}</span>)}
-                    {selected.isReflection
+                    {selected.isReflection && !hasReflectionTag(selected.tags)
                       ? <span className="is-reflection"><Sparkles size={12} /> осмысление</span>
                       : null}
                   </div>
