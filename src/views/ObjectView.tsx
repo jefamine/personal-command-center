@@ -10,7 +10,7 @@ import {
   Sparkles,
   Trash2
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { AppLink } from "../components/AppLink";
 import { EmptyState } from "../components/EmptyState";
 import type { DocumentRecord } from "../domain/documents/documentContract";
@@ -67,15 +67,118 @@ export function blocksAfterSimpleBodyEdit(object: UniversalObject, body: string)
     : [createTextBlock(body)];
 }
 
+type ObjectChildRelation = ReturnType<typeof objectChildren>[number];
+
+interface ObjectStructureControlsProps {
+  newTitle: string;
+  newRole: UniversalObjectRole;
+  candidates: readonly UniversalObject[];
+  embedId: string;
+  technicalLink?: {
+    readonly id: string;
+    onChange: (value: string) => void;
+    onConnect: () => void;
+  };
+  onNewTitleChange: (value: string) => void;
+  onNewRoleChange: (value: UniversalObjectRole) => void;
+  onCreateChild: (event: FormEvent) => void;
+  onEmbedChange: (value: string) => void;
+  onConnectEmbed: () => void;
+}
+
+function ObjectStructureControls({
+  newTitle,
+  newRole,
+  candidates,
+  embedId,
+  technicalLink,
+  onNewTitleChange,
+  onNewRoleChange,
+  onCreateChild,
+  onEmbedChange,
+  onConnectEmbed
+}: ObjectStructureControlsProps) {
+  return (
+    <aside className="object-side">
+      <section className="panel object-create-child">
+        <div className="panel-heading"><div><span className="eyebrow">Фрактальная вложенность</span><h2>Создать внутри</h2></div><Plus size={20} /></div>
+        <form onSubmit={onCreateChild}>
+          <input value={newTitle} onChange={(event) => onNewTitleChange(event.target.value)} placeholder="Название объекта" />
+          <select value={newRole} onChange={(event) => onNewRoleChange(event.target.value as UniversalObjectRole)}>
+            {roles.map((role) => <option value={role.value} key={role.value}>{role.label}</option>)}
+          </select>
+          <button className="primary-button" disabled={!newTitle.trim()}><Plus size={15} /> Создать</button>
+        </form>
+      </section>
+
+      <section className="panel object-connect">
+        <div className="panel-heading"><div><span className="eyebrow">Без дублирования</span><h2>Связать существующее</h2></div><Network size={20} /></div>
+        <label><span>Встроить карточкой</span><div><select value={embedId} onChange={(event) => onEmbedChange(event.target.value)}><option value="">Выберите объект</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select><button type="button" onClick={onConnectEmbed} disabled={!embedId}>Встроить</button></div></label>
+        {technicalLink ? (
+          <label><span>Добавить ссылку</span><div><select value={technicalLink.id} onChange={(event) => technicalLink.onChange(event.target.value)}><option value="">Выберите объект</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select><button type="button" onClick={technicalLink.onConnect} disabled={!technicalLink.id}><Link2 size={14} /> Связать</button></div></label>
+        ) : <p className="object-readonly">Обычные ссылки создаются прямо в тексте через [[Название]].</p>}
+      </section>
+    </aside>
+  );
+}
+
+interface ObjectStructureSectionsProps {
+  childRelations: readonly ObjectChildRelation[];
+  outgoingLinks: readonly ObjectRelation[];
+  backlinks: readonly ObjectRelation[];
+  renderRelationCard: (relation: ObjectRelation, related: UniversalObject | null) => ReactNode;
+  catalog: ReturnType<typeof buildObjectCatalog>;
+}
+
+function ObjectStructureSections({
+  childRelations,
+  outgoingLinks,
+  backlinks,
+  renderRelationCard,
+  catalog
+}: ObjectStructureSectionsProps) {
+  return (
+    <>
+      <section className="panel object-children-section">
+        <div className="panel-heading"><div><span className="eyebrow">Содержимое и встраивания</span><h2>Внутри объекта</h2></div><Boxes size={20} /></div>
+        {childRelations.length ? <div className="object-relation-grid">{childRelations.map(({ relation, object: related }) => renderRelationCard(relation, related))}</div> : <EmptyState icon={Boxes} title="Вложений пока нет" text="Создайте новый объект внутри или встроите существующий без копирования." />}
+      </section>
+
+      {outgoingLinks.length ? (
+        <section className="panel object-links-section">
+          <div className="panel-heading"><div><span className="eyebrow">Граф</span><h2>Связанные объекты</h2></div><Link2 size={20} /></div>
+          <div className="object-relation-grid">{outgoingLinks.map((relation) => renderRelationCard(relation, catalog.byId.get(relation.toId) ?? null))}</div>
+        </section>
+      ) : null}
+
+      {backlinks.length ? (
+        <section className="object-backlinks">
+          <Sparkles size={16} />
+          <span><strong>Обратные связи:</strong> этот объект используется ещё в {backlinks.length} {backlinks.length === 1 ? "месте" : "местах"}.</span>
+        </section>
+      ) : null}
+    </>
+  );
+}
+
 interface DocumentObjectViewProps {
   document: DocumentRecord;
   repository: DocumentRepository;
   onOpenWorkspace: () => void;
   onClose: () => void;
+  structureControls: ReactNode;
+  structureSections: ReactNode;
 }
 
 /** A document route inside the technical object page, backed only by the document API. */
-function DocumentObjectView({ document, repository, onOpenWorkspace, onClose }: DocumentObjectViewProps) {
+function DocumentObjectView({
+  document,
+  repository,
+  onOpenWorkspace,
+  onClose,
+  structureControls,
+  structureSections
+}: DocumentObjectViewProps) {
   const [title, setTitle] = useState(document.title);
   const [content, setContent] = useState(document.content);
   const [message, setMessage] = useState("");
@@ -135,14 +238,14 @@ function DocumentObjectView({ document, repository, onOpenWorkspace, onClose }: 
           ) : null}
         </form>
 
-        <aside className="object-side">
-          <section className="panel object-connect">
-            <div className="panel-heading"><div><span className="eyebrow">Внутренние ссылки</span><h2>Рабочее пространство</h2></div><Link2 size={20} /></div>
-            <p className="object-readonly">Обычные ссылки создаются прямо в тексте через [[Название]].</p>
-            <button type="button" className="primary-button" onClick={onOpenWorkspace}><ArrowUpRight size={16} /> Открыть в рабочем пространстве</button>
-          </section>
-        </aside>
+        {structureControls}
       </div>
+      <section className="panel object-connect">
+        <div className="panel-heading"><div><span className="eyebrow">Внутренние ссылки</span><h2>Рабочее пространство</h2></div><Link2 size={20} /></div>
+        <p className="object-readonly">Обычные ссылки создаются прямо в тексте через [[Название]].</p>
+        <button type="button" className="primary-button" onClick={onOpenWorkspace}><ArrowUpRight size={16} /> Открыть в рабочем пространстве</button>
+      </section>
+      {structureSections}
     </div>
   );
 }
@@ -188,19 +291,6 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
   }, [object?.id, object?.revision, object?.updatedAt]);
 
   const documentLookup = documentRepository.getDocument(objectId);
-  if (documentLookup.status === "found") {
-    return (
-      <DocumentObjectView
-        document={documentLookup.document}
-        repository={documentRepository}
-        onOpenWorkspace={() => navigate({ kind: "tool", tool: "workspace", documentId: documentLookup.document.id }, {
-          preserveTrail: true,
-          label: documentLookup.document.title || "Документ"
-        })}
-        onClose={() => navigate({ kind: "tool", tool: "workspace" })}
-      />
-    );
-  }
 
   if (!object) {
     return (
@@ -288,6 +378,43 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
     </article>
   );
 
+  if (documentLookup.status === "found") {
+    const document = documentLookup.document;
+    return (
+      <DocumentObjectView
+        document={document}
+        repository={documentRepository}
+        onOpenWorkspace={() => navigate({ kind: "tool", tool: "workspace", documentId: document.id }, {
+          preserveTrail: true,
+          label: document.title || "Документ"
+        })}
+        onClose={() => navigate({ kind: "tool", tool: "workspace" })}
+        structureControls={(
+          <ObjectStructureControls
+            newTitle={newTitle}
+            newRole={newRole}
+            candidates={candidates}
+            embedId={embedId}
+            onNewTitleChange={setNewTitle}
+            onNewRoleChange={setNewRole}
+            onCreateChild={createChild}
+            onEmbedChange={setEmbedId}
+            onConnectEmbed={() => connectExisting("embeds", embedId)}
+          />
+        )}
+        structureSections={(
+          <ObjectStructureSections
+            childRelations={children}
+            outgoingLinks={outgoingLinks}
+            backlinks={backlinks}
+            renderRelationCard={renderRelationCard}
+            catalog={catalog}
+          />
+        )}
+      />
+    );
+  }
+
   return (
     <div className="page object-page">
       <section className="object-hero">
@@ -314,44 +441,31 @@ export function ObjectView({ objectId, onEditTask }: ObjectViewProps) {
           {structuredBody ? <p className="object-readonly">Структура из нескольких блоков защищена от упрощённого редактирования. Сейчас можно переименовать объект; содержимое станет доступно в блочном редакторе.</p> : null}
         </form>
 
-        <aside className="object-side">
-          <section className="panel object-create-child">
-            <div className="panel-heading"><div><span className="eyebrow">Фрактальная вложенность</span><h2>Создать внутри</h2></div><Plus size={20} /></div>
-            <form onSubmit={createChild}>
-              <input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="Название объекта" />
-              <select value={newRole} onChange={(event) => setNewRole(event.target.value as UniversalObjectRole)}>
-                {roles.map((role) => <option value={role.value} key={role.value}>{role.label}</option>)}
-              </select>
-              <button className="primary-button" disabled={!newTitle.trim()}><Plus size={15} /> Создать</button>
-            </form>
-          </section>
-
-          <section className="panel object-connect">
-            <div className="panel-heading"><div><span className="eyebrow">Без дублирования</span><h2>Связать существующее</h2></div><Network size={20} /></div>
-            <label><span>Встроить карточкой</span><div><select value={embedId} onChange={(event) => setEmbedId(event.target.value)}><option value="">Выберите объект</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select><button type="button" onClick={() => connectExisting("embeds", embedId)} disabled={!embedId}>Встроить</button></div></label>
-            <label><span>Добавить ссылку</span><div><select value={linkId} onChange={(event) => setLinkId(event.target.value)}><option value="">Выберите объект</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select><button type="button" onClick={() => connectExisting("links", linkId)} disabled={!linkId}><Link2 size={14} /> Связать</button></div></label>
-          </section>
-        </aside>
+        <ObjectStructureControls
+          newTitle={newTitle}
+          newRole={newRole}
+          candidates={candidates}
+          embedId={embedId}
+          technicalLink={{
+            id: linkId,
+            onChange: setLinkId,
+            onConnect: () => connectExisting("links", linkId)
+          }}
+          onNewTitleChange={setNewTitle}
+          onNewRoleChange={setNewRole}
+          onCreateChild={createChild}
+          onEmbedChange={setEmbedId}
+          onConnectEmbed={() => connectExisting("embeds", embedId)}
+        />
       </div>
 
-      <section className="panel object-children-section">
-        <div className="panel-heading"><div><span className="eyebrow">Содержимое и встраивания</span><h2>Внутри объекта</h2></div><Boxes size={20} /></div>
-        {children.length ? <div className="object-relation-grid">{children.map(({ relation, object: related }) => renderRelationCard(relation, related))}</div> : <EmptyState icon={Boxes} title="Вложений пока нет" text="Создайте новый объект внутри или встроите существующий без копирования." />}
-      </section>
-
-      {outgoingLinks.length ? (
-        <section className="panel object-links-section">
-          <div className="panel-heading"><div><span className="eyebrow">Граф</span><h2>Связанные объекты</h2></div><Link2 size={20} /></div>
-          <div className="object-relation-grid">{outgoingLinks.map((relation) => renderRelationCard(relation, catalog.byId.get(relation.toId) ?? null))}</div>
-        </section>
-      ) : null}
-
-      {backlinks.length ? (
-        <section className="object-backlinks">
-          <Sparkles size={16} />
-          <span><strong>Обратные связи:</strong> этот объект используется ещё в {backlinks.length} {backlinks.length === 1 ? "месте" : "местах"}.</span>
-        </section>
-      ) : null}
+      <ObjectStructureSections
+        childRelations={children}
+        outgoingLinks={outgoingLinks}
+        backlinks={backlinks}
+        renderRelationCard={renderRelationCard}
+        catalog={catalog}
+      />
     </div>
   );
 }
