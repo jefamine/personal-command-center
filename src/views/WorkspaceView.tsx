@@ -19,9 +19,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppLink } from "../components/AppLink";
 import { DocumentLinksPanel } from "../components/DocumentLinksPanel";
 import { hasReflectionTag } from "../domain/documents/documentContract";
-import { normalizeDocumentWikiTitle, parseDocumentWikiReferences } from "../domain/documents/documentWikiLinks";
+import { normalizeDocumentWikiTitle } from "../domain/documents/documentWikiLinks";
 import { useDocumentRepository } from "../hooks/useDocumentRepository";
-import { useRelationRepository } from "../hooks/useRelationRepository";
+import { useDocumentReferenceIndex } from "../hooks/useDocumentReferenceIndex";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useDashboard } from "../state/DashboardContext";
 
@@ -55,7 +55,7 @@ function formatDocumentDate(value: string): string {
 export function WorkspaceView({ documentId }: WorkspaceViewProps) {
   const { state, saving } = useDashboard();
   const documentRepository = useDocumentRepository();
-  const relationRepository = useRelationRepository();
+  const documentReferenceIndex = useDocumentReferenceIndex();
   const { navigate } = useAppNavigation();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<WorkspaceFilter>("all");
@@ -76,7 +76,7 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
       Number(right.pinned) - Number(left.pinned) ||
       right.updatedAt.localeCompare(left.updatedAt)
     ), [documentRepository, state]);
-  const wikiLinkIndex = relationRepository.index;
+  const wikiLinkIndex = documentReferenceIndex;
 
   const selected = documents.find((document) => document.id === documentId) ?? null;
 
@@ -188,6 +188,8 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
 
   const insertDocumentReference = (target: (typeof documents)[number]) => {
     if (!selected || !selected.capabilities.canEditContent) return;
+    const targetTitle = normalizeDocumentWikiTitle(target.title);
+    if (documents.filter((document) => normalizeDocumentWikiTitle(document.title) === targetTitle).length !== 1) return;
     const textarea = bodyRef.current;
     const start = textarea?.selectionStart ?? selected.content.length;
     const end = textarea?.selectionEnd ?? start;
@@ -196,10 +198,6 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
     const content = `${selected.content.slice(0, start)}${token}${selected.content.slice(end)}`;
     pendingCursorRef.current = start + token.length;
     documentRepository.updateDocument(selected.id, { content });
-    const inserted = parseDocumentWikiReferences(content).find((entry) =>
-      entry.start === start && entry.end === start + token.length && entry.kind === kind
-    );
-    if (inserted) relationRepository.bindDocumentReference(selected.id, target.id, inserted);
     setReferenceChooser(null);
     setLinkQuery("");
   };
@@ -408,9 +406,10 @@ export function WorkspaceView({ documentId }: WorkspaceViewProps) {
                             type="button"
                             key={document.id}
                             onClick={() => insertDocumentReference(document)}
+                            disabled={isAmbiguous}
                           >
                             <span><strong>{document.title || "Без названия"}</strong><small>{document.kind === "material" ? "Материал" : "Документ"}</small></span>
-                            {isAmbiguous ? <em>название не уникально</em> : null}
+                            {isAmbiguous ? <em>Название не уникально. Переименуйте один из документов.</em> : null}
                           </button>
                         ))}
                         {!linkCandidates.length ? <p>Документы не найдены.</p> : null}

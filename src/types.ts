@@ -452,8 +452,7 @@ export type PendingRelationReason =
   | "missing-from"
   | "missing-to"
   | "missing-endpoints"
-  | "invariant-rejected"
-  | "binding-ambiguous";
+  | "invariant-rejected";
 
 /** Persisted remainder of a relation that cannot yet return to the live graph. */
 export interface PendingRelationRecovery {

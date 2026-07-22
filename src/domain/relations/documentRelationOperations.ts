@@ -1,22 +1,17 @@
 import type { DocumentId, DocumentRecord } from "../documents/documentContract";
+import type {
+  DocumentReferenceUpdateSummary,
+  DocumentUpdateResult
+} from "../documents/documentRepository";
 import {
-  documentReferenceFingerprint,
-  matchWikiBinding,
-  parseDocumentWikiReferences,
-  type DocumentWikiLinkToken,
-  type DocumentWikiReferenceKind
+  buildDocumentWikiLinkIndex,
+  normalizeDocumentWikiTitle,
+  parseDocumentWikiReferences
 } from "../documents/documentWikiLinks";
-import type { ObjectRelation } from "../objects/objectGraph";
-
-export interface DocumentRenameBindingPlan {
-  readonly relationId: string;
-  readonly token: DocumentWikiLinkToken;
-}
 
 export interface DocumentRenameSourcePlan {
   readonly sourceId: DocumentId;
   readonly content: string;
-  readonly bindings: readonly DocumentRenameBindingPlan[];
 }
 
 export interface DocumentRenamePlan {
@@ -24,80 +19,78 @@ export interface DocumentRenamePlan {
   readonly skippedSources: readonly { readonly id: string; readonly reason: string }[];
 }
 
-/** Plans exact bound-token edits. Applying the plan remains the repository's responsibility. */
+/** Applies every source edit through the canonical document update command. */
+export function applyDocumentReferenceRenamePlan(
+  plan: DocumentRenamePlan,
+  updateDocument: (id: DocumentId, content: string) => DocumentUpdateResult
+): DocumentReferenceUpdateSummary {
+  const updatedSources: string[] = [];
+  const rejectedSources: Array<{ id: string; reason: string }> = [];
+  plan.sources.forEach((source) => {
+    const result = updateDocument(source.sourceId, source.content);
+    if (result.status === "accepted") updatedSources.push(source.sourceId);
+    else rejectedSources.push({ id: source.sourceId, reason: result.status });
+  });
+  return {
+    updatedSources,
+    skippedSources: plan.skippedSources,
+    rejectedSources
+  };
+}
+
+/**
+ * Plans text-only rename propagation from the pre-rename document snapshot.
+ * Only references uniquely resolved to targetId are eligible for replacement.
+ */
 export function planDocumentReferenceRename(
   targetId: DocumentId,
   nextTitle: string,
-  relations: readonly ObjectRelation[],
   documents: readonly DocumentRecord[]
 ): DocumentRenamePlan {
+  const target = documents.find((document) => document.id === targetId);
+  if (!target) {
+    return { sources: [], skippedSources: [{ id: targetId, reason: "target-not-found" }] };
+  }
+
+  const oldTitle = normalizeDocumentWikiTitle(target.title);
+  const sameTitleCount = documents.filter((document) =>
+    normalizeDocumentWikiTitle(document.title) === oldTitle
+  ).length;
+  const index = buildDocumentWikiLinkIndex(documents);
   const sources: DocumentRenameSourcePlan[] = [];
   const skippedSources: Array<{ id: string; reason: string }> = [];
-  const bySource = new Map<string, ObjectRelation[]>();
-  relations.filter((relation) => relation.toId === targetId && relation.origin !== "manual")
-    .forEach((relation) => bySource.set(relation.fromId, [
-      ...(bySource.get(relation.fromId) ?? []), relation
-    ]));
 
-  bySource.forEach((sourceRelations, sourceId) => {
-    const source = documents.find((document) => document.id === sourceId);
-    if (!source) {
-      skippedSources.push({ id: sourceId, reason: "source-not-found" });
+  documents.forEach((source) => {
+    const matchingTokens = parseDocumentWikiReferences(source.content).filter((token) =>
+      normalizeDocumentWikiTitle(token.label) === oldTitle
+    );
+    if (!matchingTokens.length) return;
+
+    const references = index.outgoingFor(source.id).filter((reference) =>
+      reference.status === "resolved" && reference.targetDocumentId === targetId
+    );
+    if (!references.length) {
+      skippedSources.push({
+        id: source.id,
+        reason: sameTitleCount > 1 ? "ambiguous-title" : "not-resolved"
+      });
       return;
     }
     if (!source.capabilities.canEditContent || !source.capabilities.supportsSimpleTextEditing) {
-      skippedSources.push({ id: sourceId, reason: source.kind === "material" ? "read-only" : "structured" });
+      skippedSources.push({
+        id: source.id,
+        reason: source.kind === "material" ? "read-only" : "structured"
+      });
       return;
     }
 
-    const tokens = parseDocumentWikiReferences(source.content);
-    const used = new Set<number>();
-    const replacements: Array<{
-      relation: ObjectRelation;
-      token: DocumentWikiLinkToken;
-      replacement: string;
-    }> = [];
-    sourceRelations.forEach((relation) => {
-      if (relation.origin === "manual") return;
-      const kind: DocumentWikiReferenceKind = relation.origin === "wiki-link" ? "link" : "embed";
-      const matched = matchWikiBinding(relation.binding, kind, tokens, used);
-      if (matched.status !== "matched") {
-        skippedSources.push({ id: sourceId, reason: `binding-${matched.status}` });
-        return;
-      }
-      used.add(tokens.indexOf(matched.token));
-      replacements.push({
-        relation,
-        token: matched.token,
-        replacement: `${kind === "embed" ? "!" : ""}[[${nextTitle}]]`
-      });
-    });
-    if (!replacements.length) return;
-
     let content = source.content;
-    [...replacements].sort((left, right) => right.token.start - left.token.start).forEach((entry) => {
-      content = `${content.slice(0, entry.token.start)}${entry.replacement}${content.slice(entry.token.end)}`;
+    [...references].sort((left, right) => right.start - left.start).forEach((reference) => {
+      const replacement = `${reference.kind === "embed" ? "!" : ""}[[${nextTitle}]]`;
+      content = `${content.slice(0, reference.start)}${replacement}${content.slice(reference.end)}`;
     });
-    const bindings = replacements.map((entry): DocumentRenameBindingPlan => {
-      const shift = replacements
-        .filter((candidate) => candidate.token.start < entry.token.start)
-        .reduce((sum, candidate) => sum + candidate.replacement.length - candidate.token.raw.length, 0);
-      const start = entry.token.start + shift;
-      const end = start + entry.replacement.length;
-      return {
-        relationId: entry.relation.id,
-        token: {
-          kind: entry.token.kind,
-          label: nextTitle,
-          raw: entry.replacement,
-          start,
-          end,
-          occurrence: entry.token.occurrence,
-          contextFingerprint: documentReferenceFingerprint(content, start, end)
-        }
-      };
-    });
-    sources.push({ sourceId: source.id, content, bindings });
+    if (content !== source.content) sources.push({ sourceId: source.id, content });
   });
+
   return { sources, skippedSources };
 }

@@ -7,6 +7,7 @@ import {
   addRelationToState,
   captureRelationsForDeletion,
   liveRelationEndpointIds,
+  purgeRelationsForEndpoints,
   restoreCapturedRelations,
   retryPendingRelations
 } from "./relationRepository";
@@ -36,7 +37,7 @@ function stateFixture(): DashboardState {
 }
 
 function add(state: DashboardState, id: string, fromId: string, toId: string) {
-  return addRelationToState(state, { id, kind: "links", fromId, toId, origin: "manual" }, { now });
+  return addRelationToState(state, { id, kind: "links", fromId, toId }, { now });
 }
 
 describe("mixed relation application boundary", () => {
@@ -133,18 +134,69 @@ describe("atomic relation deletion and recovery", () => {
     expect(retry.state.pendingRelations).toEqual([]);
   });
 
-  it("does not duplicate a relation while restoring and preserves relation origins", () => {
+  it("does not duplicate a semantic relation while restoring", () => {
     const state = mixedState();
     const relation = state.objectGraph.relations[0];
     const restored = restoreCapturedRelations(state, [relation]);
     expect(restored.state.objectGraph.relations).toHaveLength(2);
+  });
 
-    const wiki: ObjectRelation = {
-      id: "wiki", kind: "links", fromId: "native-a", toId: "native-b", origin: "wiki-link",
-      order: 0, createdAt: now,
-      binding: { labelAtBinding: "B", occurrence: 0, lastKnownStart: 0, lastKnownEnd: 5, contextFingerprint: "x" }
+  it("permanently removing a material deletes its semantic relations without pending recovery", () => {
+    const relation = add(stateFixture(), "material-link", "native-a", materialDocumentId("material"));
+    if (relation.result.status !== "accepted") throw new Error("fixture failed");
+    const pending: ObjectRelation = {
+      id: "material-pending", kind: "links", fromId: "native-b",
+      toId: materialDocumentId("material"), order: 0, createdAt: now
     };
-    const wikiRestored = restoreCapturedRelations(state, [wiki]);
-    expect(wikiRestored.restored[0]).toMatchObject({ origin: "wiki-link", binding: { labelAtBinding: "B" } });
+    const state = {
+      ...relation.state,
+      pendingRelations: [{ relation: pending, reason: "missing-to" as const, capturedAt: now }]
+    };
+    const purged = purgeRelationsForEndpoints(state, [materialDocumentId("material")]);
+    expect(purged.objectGraph.relations).toEqual([]);
+    expect(purged.pendingRelations).toEqual([]);
+    expect(purged.objectGraph.objects.some((object) => object.id === "native-a")).toBe(true);
+  });
+
+  it("purges pending relations for one destroyed endpoint and keeps unrelated recovery entries", () => {
+    const related: ObjectRelation = {
+      id: "related", kind: "links", fromId: noteDocumentId("note-a"),
+      toId: "missing", order: 0, createdAt: now
+    };
+    const unrelated: ObjectRelation = {
+      id: "unrelated", kind: "links", fromId: "native-a",
+      toId: "elsewhere", order: 0, createdAt: now
+    };
+    const state = {
+      ...stateFixture(),
+      pendingRelations: [related, unrelated].map((relation) => ({
+        relation, reason: "missing-to" as const, capturedAt: now
+      }))
+    };
+    const purged = purgeRelationsForEndpoints(state, [noteDocumentId("note-a")]);
+    expect(purged.pendingRelations.map((entry) => entry.relation.id)).toEqual(["unrelated"]);
+  });
+
+  it("purges pending relations for every endpoint destroyed by empty trash", () => {
+    const first: ObjectRelation = {
+      id: "first", kind: "links", fromId: noteDocumentId("note-a"),
+      toId: "missing-a", order: 0, createdAt: now
+    };
+    const second: ObjectRelation = {
+      id: "second", kind: "embeds", fromId: "missing-b",
+      toId: "native-b", order: 0, createdAt: now
+    };
+    const unrelated: ObjectRelation = {
+      id: "keep", kind: "links", fromId: "native-a",
+      toId: "missing-c", order: 0, createdAt: now
+    };
+    const state = {
+      ...stateFixture(),
+      pendingRelations: [first, second, unrelated].map((relation) => ({
+        relation, reason: "missing-to" as const, capturedAt: now
+      }))
+    };
+    const purged = purgeRelationsForEndpoints(state, [noteDocumentId("note-a"), "native-b"]);
+    expect(purged.pendingRelations.map((entry) => entry.relation.id)).toEqual(["keep"]);
   });
 });

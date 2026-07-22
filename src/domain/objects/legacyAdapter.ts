@@ -69,8 +69,7 @@ function legacyRelation(
     fromId,
     toId,
     order: 0,
-    createdAt,
-    origin: "manual"
+    createdAt
   };
 }
 

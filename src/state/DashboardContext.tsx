@@ -28,20 +28,15 @@ import {
   type UniversalObject,
   type UniversalObjectDraft
 } from "../domain/objects/objectGraph";
-import { materialDocumentId, noteDocumentId, type DocumentId } from "../domain/documents/documentContract";
-import { listDocumentRecords } from "../domain/documents/documentRepository";
-import type { DocumentWikiLinkToken } from "../domain/documents/documentWikiLinks";
+import { materialDocumentId, noteDocumentId } from "../domain/documents/documentContract";
 import {
   addRelationToState,
-  bindDocumentReference as bindReferenceInState,
   captureRelationsForDeletion,
-  reconcileDocumentReferences as reconcileReferencesInState,
-  rebindDocumentReference as rebindReferenceInState,
+  purgeRelationsForEndpoints,
   removeRelationFromState,
   restoreCapturedRelations,
   retryPendingRelations,
-  type ReferenceReconciliationResult,
-  type RelationMutationResult
+  trashEntryRelationEndpointId
 } from "../domain/relations/relationRepository";
 import { lifeAreaTitleKey } from "../domain/life/lifeAreas";
 import {
@@ -115,13 +110,6 @@ interface DashboardContextValue {
   removeObject: (id: string) => void;
   addObjectRelation: (draft: ObjectRelationDraft) => ObjectRelation;
   removeObjectRelation: (relationId: string) => void;
-  reconcileDocumentRelations: (documentId: DocumentId) => ReferenceReconciliationResult | null;
-  bindDocumentReference: (
-    sourceId: DocumentId,
-    targetId: DocumentId,
-    token: DocumentWikiLinkToken
-  ) => RelationMutationResult;
-  rebindDocumentReference: (relationId: string, token: DocumentWikiLinkToken) => RelationMutationResult;
   addTask: (draft: TaskDraft) => Task;
   updateTask: (id: string, changes: TaskUpdate) => void;
   toggleTask: (id: string) => void;
@@ -427,8 +415,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
           const added = addRelationToState(next, {
             kind: placement.kind ?? "contains",
             fromId: placement.parentId,
-            toId: object.id,
-            origin: "manual"
+            toId: object.id
           }, { now });
           if (added.result.status === "rejected") throw new Error(added.result.message);
           next = added.state;
@@ -530,50 +517,6 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     },
     [mutate]
   );
-
-  const reconcileDocumentRelations = useCallback((documentId: DocumentId) => {
-    let result: ReferenceReconciliationResult | null = null;
-    mutate((current) => {
-      const documents = listDocumentRecords(current);
-      const source = documents.find((document) => document.id === documentId);
-      if (!source) return current;
-      result = reconcileReferencesInState(current, source, documents);
-      return result.state;
-    });
-    return result;
-  }, [mutate]);
-
-  const bindDocumentReference = useCallback((
-    sourceId: DocumentId,
-    targetId: DocumentId,
-    token: DocumentWikiLinkToken
-  ) => {
-    let result: RelationMutationResult = {
-      status: "rejected",
-      code: "command-rejected",
-      message: "Связь не была создана."
-    };
-    mutate((current) => {
-      const bound = bindReferenceInState(current, sourceId, targetId, token);
-      result = bound.result;
-      return bound.state;
-    });
-    return result;
-  }, [mutate]);
-
-  const rebindDocumentReference = useCallback((relationId: string, token: DocumentWikiLinkToken) => {
-    let result: RelationMutationResult = {
-      status: "rejected",
-      code: "command-rejected",
-      message: "Связь не была обновлена."
-    };
-    mutate((current) => {
-      const rebound = rebindReferenceInState(current, relationId, token);
-      result = rebound.result;
-      return rebound.state;
-    });
-    return result;
-  }, [mutate]);
 
   const addTask = useCallback(
     (draft: TaskDraft) => {
@@ -1794,12 +1737,11 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (id: string) => {
       mutate((current) => {
         if (!current.readingItems.some((item) => item.id === id)) return current;
-        const captured = captureRelationsForDeletion(current, materialDocumentId(id));
-        const withoutMaterial: DashboardState = {
-          ...captured.state,
-          readingItems: captured.state.readingItems.filter((item) => item.id !== id)
+        const withoutRelations = purgeRelationsForEndpoints(current, [materialDocumentId(id)]);
+        return {
+          ...withoutRelations,
+          readingItems: withoutRelations.readingItems.filter((item) => item.id !== id)
         };
-        return restoreCapturedRelations(withoutMaterial, captured.relations).state;
       });
     },
     [mutate]
@@ -1867,9 +1809,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       mutate((current) => {
         const entry = current.trash.find((candidate) => candidate.id === id);
         if (!entry) return current;
+        const withoutRelations = purgeRelationsForEndpoints(current, [trashEntryRelationEndpointId(entry)]);
         return {
-          ...current,
-          trash: current.trash.filter((candidate) => candidate.id !== id),
+          ...withoutRelations,
+          trash: withoutRelations.trash.filter((candidate) => candidate.id !== id),
           activityLog: withActivity(current, "trash_purged", entry.entityId, {
             kind: entry.entityKind
           })
@@ -1880,7 +1823,14 @@ export function DashboardProvider({ children }: PropsWithChildren) {
   );
 
   const emptyTrash = useCallback(() => {
-    mutate((current) => current.trash.length ? { ...current, trash: [] } : current);
+    mutate((current) => {
+      if (!current.trash.length) return current;
+      const withoutRelations = purgeRelationsForEndpoints(
+        current,
+        current.trash.map(trashEntryRelationEndpointId)
+      );
+      return { ...withoutRelations, trash: [] };
+    });
   }, [mutate]);
 
   const restoreRevision = useCallback(
@@ -1999,9 +1949,6 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       removeObject,
       addObjectRelation,
       removeObjectRelation,
-      reconcileDocumentRelations,
-      bindDocumentReference,
-      rebindDocumentReference,
       addTask,
       updateTask,
       toggleTask,
@@ -2061,9 +2008,6 @@ export function DashboardProvider({ children }: PropsWithChildren) {
       removeObject,
       addObjectRelation,
       removeObjectRelation,
-      reconcileDocumentRelations,
-      bindDocumentReference,
-      rebindDocumentReference,
       addTask,
       updateTask,
       toggleTask,

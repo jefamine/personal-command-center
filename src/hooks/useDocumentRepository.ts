@@ -4,8 +4,10 @@ import {
   createDocumentRepository,
   type DocumentReferenceUpdateSummary
 } from "../domain/documents/documentRepository";
-import type { ObjectRelation } from "../domain/objects/objectGraph";
-import { planDocumentReferenceRename } from "../domain/relations/documentRelationOperations";
+import {
+  applyDocumentReferenceRenamePlan,
+  planDocumentReferenceRename
+} from "../domain/relations/documentRelationOperations";
 import { useDashboard } from "../state/DashboardContext";
 
 /**
@@ -20,9 +22,7 @@ export function useDocumentRepository() {
     updateNote,
     removeNote,
     updateObject,
-    removeObject,
-    reconcileDocumentRelations,
-    rebindDocumentReference
+    removeObject
   } = useDashboard();
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -40,52 +40,32 @@ export function useDocumentRepository() {
     const propagateRename = (
       targetId: DocumentId,
       nextTitle: string,
-      relations: readonly ObjectRelation[],
       sourceDocuments: ReturnType<typeof repository.listDocuments>
     ): DocumentReferenceUpdateSummary => {
-      const updatedSources: string[] = [];
-      const skippedSources: Array<{ id: string; reason: string }> = [];
-      const rejectedSources: Array<{ id: string; reason: string }> = [];
-      const plan = planDocumentReferenceRename(targetId, nextTitle, relations, sourceDocuments);
-      skippedSources.push(...plan.skippedSources);
-      plan.sources.forEach((source) => {
-        const update = repository.updateDocument(source.sourceId, { content: source.content });
-        if (update.status !== "accepted") {
-          rejectedSources.push({ id: source.sourceId, reason: update.status });
-          return;
-        }
-        source.bindings.forEach((binding) => {
-          const rebound = rebindDocumentReference(binding.relationId, binding.token);
-          if (rebound.status === "rejected") {
-            rejectedSources.push({ id: source.sourceId, reason: rebound.code });
-          }
-        });
-        updatedSources.push(source.sourceId);
-      });
-      return { updatedSources, skippedSources, rejectedSources };
+      const plan = planDocumentReferenceRename(targetId, nextTitle, sourceDocuments);
+      return applyDocumentReferenceRenamePlan(
+        plan,
+        (sourceId, content) => repository.updateDocument(sourceId, { content })
+      );
     };
 
     return {
       ...repository,
       updateDocument: (id: Parameters<typeof repository.updateDocument>[0], patch: Parameters<typeof repository.updateDocument>[1]) => {
         const before = repository.getDocument(id);
-        const stateBefore = stateRef.current;
         const sourceDocuments = repository.listDocuments();
         const result = repository.updateDocument(id, patch);
         if (result.status !== "accepted") return result;
-        if (typeof patch.content === "string") reconcileDocumentRelations(id);
         const titleChanged = before.status === "found" && typeof patch.title === "string" &&
           Boolean(patch.title.trim()) && patch.title !== before.document.title;
         const referenceUpdate = titleChanged
-          ? propagateRename(id, patch.title!, stateBefore.objectGraph.relations, sourceDocuments)
+          ? propagateRename(id, patch.title!.trim(), sourceDocuments)
           : undefined;
         return referenceUpdate ? { ...result, referenceUpdate } : result;
       }
     };
   }, [
     addNote,
-    reconcileDocumentRelations,
-    rebindDocumentReference,
     removeNote,
     removeObject,
     updateNote,

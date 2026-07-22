@@ -17,9 +17,8 @@ interface DocumentLinksPanelProps {
 const MAX_EMBED_DEPTH = 3;
 
 function linkStatusText(status: DocumentWikiLinkStatus): string {
-  if (status === "ambiguous") return "Название не уникально — выберите конкретный документ через меню вставки.";
+  if (status === "ambiguous") return "Название не уникально. Переименуйте один из документов.";
   if (status === "self") return "Ссылка ведёт на этот же документ.";
-  if (status === "unbound") return "Ссылка требует явного выбора документа.";
   return "Документ с таким названием пока не найден.";
 }
 
@@ -86,7 +85,7 @@ function EmbedPreview({
   );
 }
 
-/** Stable links, backlinks and read-only live embeds for one document. */
+/** Computed links, backlinks and read-only live embeds for one document. */
 export function DocumentLinksPanel({
   document,
   documents,

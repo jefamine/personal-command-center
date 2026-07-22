@@ -24,14 +24,6 @@ export type UniversalBlockType =
   | "audio"
   | "file";
 export type ObjectRelationKind = "contains" | "links" | "embeds";
-export type ObjectRelationOrigin = "manual" | "wiki-link" | "wiki-embed";
-export interface WikiRelationBinding {
-  labelAtBinding: string;
-  occurrence: number;
-  lastKnownStart: number;
-  lastKnownEnd: number;
-  contextFingerprint: string;
-}
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface UniversalObjectBlock {
@@ -64,7 +56,7 @@ export interface UniversalObject {
   deletedAt: string | null;
 }
 
-interface ObjectRelationBase {
+export interface ObjectRelation {
   id: string;
   kind: ObjectRelationKind;
   fromId: string;
@@ -72,11 +64,6 @@ interface ObjectRelationBase {
   order: number;
   createdAt: string;
 }
-
-export type ObjectRelation =
-  | (ObjectRelationBase & { origin: "manual"; binding?: never })
-  | (ObjectRelationBase & { kind: "links"; origin: "wiki-link"; binding: WikiRelationBinding })
-  | (ObjectRelationBase & { kind: "embeds"; origin: "wiki-embed"; binding: WikiRelationBinding });
 
 export interface ObjectGraph {
   schemaVersion: 1;
@@ -98,8 +85,6 @@ export interface ObjectRelationDraft {
   fromId: string;
   toId: string;
   order?: number;
-  origin?: ObjectRelationOrigin;
-  binding?: WikiRelationBinding;
 }
 
 export type ObjectGraphErrorCode =
@@ -137,7 +122,6 @@ const blockTypes: UniversalBlockType[] = [
   "file"
 ];
 const relationKinds: ObjectRelationKind[] = ["contains", "links", "embeds"];
-const relationOrigins: ObjectRelationOrigin[] = ["manual", "wiki-link", "wiki-embed"];
 const objectStatuses: UniversalObjectStatus[] = ["active", "completed", "archived", "deleted"];
 const knownRoles: KnownObjectRole[] = [
   "document",
@@ -267,39 +251,13 @@ function normalizeRelation(value: unknown): ObjectRelation | null {
   ) {
     return null;
   }
-  const origin = relationOrigins.includes(value.origin as ObjectRelationOrigin)
-    ? value.origin as ObjectRelationOrigin
-    : "manual";
-  const binding = normalizeWikiBinding(value.binding);
-  const base: ObjectRelationBase = {
+  return {
     id: value.id,
     kind: value.kind as ObjectRelationKind,
     fromId: value.fromId,
     toId: value.toId,
     order: Number.isFinite(value.order) ? Math.max(0, Math.floor(Number(value.order))) : 0,
     createdAt: isDateString(value.createdAt) ? value.createdAt : new Date(0).toISOString()
-  };
-  if (origin === "manual") return { ...base, origin };
-  if (!binding || (origin === "wiki-link" && base.kind !== "links") ||
-    (origin === "wiki-embed" && base.kind !== "embeds")) return null;
-  return origin === "wiki-link"
-    ? { ...base, kind: "links", origin, binding }
-    : { ...base, kind: "embeds", origin, binding };
-}
-
-function normalizeWikiBinding(value: unknown): WikiRelationBinding | null {
-  if (!isRecord(value) ||
-    !isNonEmptyString(value.labelAtBinding) ||
-    !Number.isInteger(value.occurrence) || Number(value.occurrence) < 0 ||
-    !Number.isInteger(value.lastKnownStart) || Number(value.lastKnownStart) < 0 ||
-    !Number.isInteger(value.lastKnownEnd) || Number(value.lastKnownEnd) <= Number(value.lastKnownStart) ||
-    !isNonEmptyString(value.contextFingerprint)) return null;
-  return {
-    labelAtBinding: value.labelAtBinding.trim(),
-    occurrence: Number(value.occurrence),
-    lastKnownStart: Number(value.lastKnownStart),
-    lastKnownEnd: Number(value.lastKnownEnd),
-    contextFingerprint: value.contextFingerprint
   };
 }
 
@@ -353,9 +311,6 @@ function hasValidObjectShape(value: unknown): boolean {
 
 function hasValidRelationShape(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  const origin = value.origin === undefined
-    ? "manual"
-    : value.origin as ObjectRelationOrigin;
   return isNonEmptyString(value.id) &&
     relationKinds.includes(value.kind as ObjectRelationKind) &&
     isNonEmptyString(value.fromId) &&
@@ -363,13 +318,7 @@ function hasValidRelationShape(value: unknown): boolean {
     value.fromId !== value.toId &&
     Number.isInteger(value.order) &&
     Number(value.order) >= 0 &&
-    isDateString(value.createdAt) &&
-    relationOrigins.includes(origin) &&
-    (origin === "manual"
-      ? value.binding === undefined
-      : Boolean(normalizeWikiBinding(value.binding)) &&
-        ((origin === "wiki-link" && value.kind === "links") ||
-          (origin === "wiki-embed" && value.kind === "embeds")));
+    isDateString(value.createdAt);
 }
 
 export function createEmptyObjectGraph(): ObjectGraph {
@@ -503,24 +452,10 @@ export function addObjectRelation(
       "Связь может ссылаться только на существующие объекты актуального каталога."
     );
   }
-  const origin = draft.origin ?? "manual";
-  const binding = origin === "manual" ? null : normalizeWikiBinding(draft.binding);
-  if (!relationOrigins.includes(origin) ||
-    (origin !== "manual" && !binding) ||
-    (origin === "wiki-link" && draft.kind !== "links") ||
-    (origin === "wiki-embed" && draft.kind !== "embeds")) {
-    throw new ObjectGraphError("invalid_relation", "Wiki-связь должна содержать origin и пользовательскую метку.");
-  }
   if (graph.relations.some((entry) =>
     entry.kind === draft.kind &&
     entry.fromId === draft.fromId &&
-    entry.toId === draft.toId &&
-    entry.origin === origin &&
-    (entry.origin === "manual" || origin === "manual" || (
-      entry.binding.labelAtBinding === binding?.labelAtBinding &&
-      entry.binding.occurrence === binding.occurrence &&
-      entry.binding.contextFingerprint === binding.contextFingerprint
-    ))
+    entry.toId === draft.toId
   )) {
     throw new ObjectGraphError("duplicate_relation", "Такая связь уже существует.");
   }
@@ -535,7 +470,7 @@ export function addObjectRelation(
       throw new ObjectGraphError("containment_cycle", "Вложение создаёт бесконечный цикл.");
     }
   }
-  const base: ObjectRelationBase = {
+  const relation: ObjectRelation = {
     id: relationId,
     kind: draft.kind,
     fromId: draft.fromId,
@@ -543,11 +478,6 @@ export function addObjectRelation(
     order: Number.isFinite(draft.order) ? Math.max(0, Math.floor(Number(draft.order))) : 0,
     createdAt: options.now ?? new Date().toISOString()
   };
-  const relation: ObjectRelation = origin === "manual"
-    ? { ...base, origin }
-    : origin === "wiki-link"
-      ? { ...base, kind: "links", origin, binding: binding! }
-      : { ...base, kind: "embeds", origin, binding: binding! };
   return { ...graph, relations: [...graph.relations, relation] };
 }
 

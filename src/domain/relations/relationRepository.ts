@@ -1,14 +1,6 @@
-import type { DashboardState, PendingRelationReason, PendingRelationRecovery } from "../../types";
-import type { DocumentId, DocumentRecord } from "../documents/documentContract";
-import {
-  matchWikiBinding,
-  normalizeDocumentWikiTitle,
-  parseDocumentWikiReferences,
-  wikiBindingForToken,
-  type DocumentWikiLinkToken,
-  type DocumentWikiReferenceKind
-} from "../documents/documentWikiLinks";
-import { buildObjectCatalog } from "../objects/legacyAdapter";
+import type { DashboardState, PendingRelationReason, PendingRelationRecovery, TrashEntry } from "../../types";
+import { noteDocumentId } from "../documents/documentContract";
+import { buildObjectCatalog, legacyObjectReference } from "../objects/legacyAdapter";
 import {
   addObjectRelation,
   ObjectGraphError,
@@ -32,14 +24,6 @@ export interface RestoredRelations {
   readonly pending: readonly PendingRelationRecovery[];
 }
 
-export interface ReferenceReconciliationResult {
-  readonly state: DashboardState;
-  readonly created: readonly ObjectRelation[];
-  readonly updated: readonly ObjectRelation[];
-  readonly removed: readonly ObjectRelation[];
-  readonly pending: readonly PendingRelationRecovery[];
-}
-
 export function liveRelationEndpointIds(state: DashboardState): ReadonlySet<string> {
   return new Set(buildObjectCatalog(state).objects
     .filter((object) => object.status !== "deleted")
@@ -47,16 +31,7 @@ export function liveRelationEndpointIds(state: DashboardState): ReadonlySet<stri
 }
 
 export function relationIdentity(relation: ObjectRelation): string {
-  const binding = relation.origin === "manual" ? null : relation.binding;
-  return [
-    relation.kind,
-    relation.fromId,
-    relation.toId,
-    relation.origin,
-    binding?.labelAtBinding ?? "",
-    binding?.occurrence ?? "",
-    binding?.contextFingerprint ?? ""
-  ].join("\u0000");
+  return [relation.kind, relation.fromId, relation.toId].join("\u0000");
 }
 
 export function getRelationsFor(state: DashboardState, id: string): readonly ObjectRelation[] {
@@ -187,12 +162,39 @@ export function restoreCapturedRelations(
 }
 
 export function retryPendingRelations(state: DashboardState): RestoredRelations {
-  const retained = state.pendingRelations.filter((entry) => entry.reason === "binding-ambiguous");
-  const retryable = state.pendingRelations.filter((entry) => entry.reason !== "binding-ambiguous");
   return restoreCapturedRelations(
-    { ...state, pendingRelations: retained },
-    retryable.map((entry) => entry.relation)
+    { ...state, pendingRelations: [] },
+    state.pendingRelations.map((entry) => entry.relation)
   );
+}
+
+/** Permanently removes semantic relations and recovery entries for destroyed endpoints. */
+export function purgeRelationsForEndpoints(
+  state: DashboardState,
+  endpointIds: Iterable<string>
+): DashboardState {
+  const removed = new Set(endpointIds);
+  if (!removed.size) return state;
+  return {
+    ...state,
+    objectGraph: {
+      ...state.objectGraph,
+      relations: state.objectGraph.relations.filter((relation) =>
+        !removed.has(relation.fromId) && !removed.has(relation.toId)
+      )
+    },
+    pendingRelations: state.pendingRelations.filter((entry) =>
+      !removed.has(entry.relation.fromId) && !removed.has(entry.relation.toId)
+    )
+  };
+}
+
+export function trashEntryRelationEndpointId(entry: TrashEntry): string {
+  const snapshot = entry.snapshot;
+  if (snapshot.kind === "note") return noteDocumentId(snapshot.note.id);
+  if (snapshot.kind === "object") return snapshot.object.id;
+  if (snapshot.kind === "task") return legacyObjectReference("task", snapshot.task.id);
+  return legacyObjectReference("event", snapshot.event.id);
 }
 
 export function quarantineDanglingRelations(
@@ -224,166 +226,4 @@ export function assertPersistedRelationEndpoints(state: DashboardState): void {
       `Связь ${invalid.id} ссылается на отсутствующий endpoint.`
     );
   }
-}
-
-function relationKind(kind: DocumentWikiReferenceKind): "links" | "embeds" {
-  return kind === "link" ? "links" : "embeds";
-}
-
-function relationOrigin(kind: DocumentWikiReferenceKind): "wiki-link" | "wiki-embed" {
-  return kind === "link" ? "wiki-link" : "wiki-embed";
-}
-
-function documentByTitle(documents: readonly DocumentRecord[]) {
-  const result = new Map<string, DocumentRecord[]>();
-  documents.forEach((document) => {
-    const key = normalizeDocumentWikiTitle(document.title);
-    if (!key) return;
-    result.set(key, [...(result.get(key) ?? []), document]);
-  });
-  return result;
-}
-
-/** Reconciles canonical wiki syntax with stable relations without rewriting text. */
-export function reconcileDocumentReferences(
-  state: DashboardState,
-  source: DocumentRecord,
-  documents: readonly DocumentRecord[],
-  options: { now?: string; idFactory?: () => string } = {}
-): ReferenceReconciliationResult {
-  const now = options.now ?? new Date().toISOString();
-  const idFactory = options.idFactory ?? (() => crypto.randomUUID());
-  const tokens = parseDocumentWikiReferences(source.content);
-  const used = new Set<number>();
-  const created: ObjectRelation[] = [];
-  const updated: ObjectRelation[] = [];
-  const removed: ObjectRelation[] = [];
-  const pending: PendingRelationRecovery[] = [];
-  const retained: ObjectRelation[] = [];
-  const sourceWikiRelations = state.objectGraph.relations.filter((relation) =>
-    relation.fromId === source.id && relation.origin !== "manual"
-  );
-
-  state.objectGraph.relations.forEach((relation) => {
-    if (!sourceWikiRelations.includes(relation)) retained.push(relation);
-  });
-
-  sourceWikiRelations.forEach((relation) => {
-    const kind: DocumentWikiReferenceKind = relation.origin === "wiki-link" ? "link" : "embed";
-    const match = matchWikiBinding(relation.binding!, kind, tokens, used);
-    if (match.status === "matched") {
-      const tokenIndex = tokens.indexOf(match.token);
-      used.add(tokenIndex);
-      const nextRelation = {
-        ...relation,
-        binding: wikiBindingForToken(match.token)
-      } as ObjectRelation;
-      retained.push(nextRelation);
-      if (relationIdentity(nextRelation) !== relationIdentity(relation) ||
-        JSON.stringify(nextRelation.binding) !== JSON.stringify(relation.binding)) updated.push(nextRelation);
-      return;
-    }
-    if (match.status === "ambiguous") {
-      const recovery = { relation, reason: "binding-ambiguous" as const, capturedAt: now };
-      pending.push(recovery);
-      return;
-    }
-    removed.push(relation);
-  });
-
-  const byTitle = documentByTitle(documents);
-  const recoveryBindings = [...state.pendingRelations, ...pending]
-    .filter((entry) => entry.reason === "binding-ambiguous" && entry.relation.fromId === source.id);
-  let next = { ...state, objectGraph: { ...state.objectGraph, relations: retained } };
-  tokens.forEach((token, tokenIndex) => {
-    if (used.has(tokenIndex)) return;
-    const tokenOrigin = relationOrigin(token.kind);
-    if (recoveryBindings.some((entry) =>
-      entry.relation.origin === tokenOrigin &&
-      normalizeDocumentWikiTitle(entry.relation.binding!.labelAtBinding) === normalizeDocumentWikiTitle(token.label)
-    )) return;
-    const matches = byTitle.get(normalizeDocumentWikiTitle(token.label)) ?? [];
-    if (matches.length !== 1) return;
-    const target = matches[0];
-    if (target.id === source.id) return;
-    const draft: ObjectRelationDraft = token.kind === "link"
-      ? {
-          id: idFactory(), kind: "links", fromId: source.id, toId: target.id,
-          origin: "wiki-link", binding: wikiBindingForToken(token)
-        }
-      : {
-          id: idFactory(), kind: "embeds", fromId: source.id, toId: target.id,
-          origin: "wiki-embed", binding: wikiBindingForToken(token)
-        };
-    const added = addRelationToState(next, draft, { now, idFactory: () => draft.id! });
-    if (added.result.status !== "accepted") return;
-    next = added.state;
-    created.push(added.result.relation);
-    used.add(tokenIndex);
-  });
-
-  next = {
-    ...next,
-    pendingRelations: uniquePending([...state.pendingRelations, ...pending])
-  };
-  return { state: next, created, updated, removed, pending };
-}
-
-/** Creates a binding for the exact token selected through the document chooser. */
-export function bindDocumentReference(
-  state: DashboardState,
-  sourceId: DocumentId,
-  targetId: DocumentId,
-  token: DocumentWikiLinkToken,
-  options: { now?: string; idFactory?: () => string } = {}
-): { readonly state: DashboardState; readonly result: RelationMutationResult } {
-  const origin = relationOrigin(token.kind);
-  const kind = relationKind(token.kind);
-  const existing = state.objectGraph.relations.find((relation) =>
-    relation.fromId === sourceId && relation.origin === origin &&
-    relation.binding.lastKnownStart === token.start && relation.binding.lastKnownEnd === token.end
-  );
-  const withoutExisting = existing ? removeRelationFromState(state, existing.id) : state;
-  const withoutPending = {
-    ...withoutExisting,
-    pendingRelations: withoutExisting.pendingRelations.filter((entry) => !(
-      entry.reason === "binding-ambiguous" &&
-      entry.relation.fromId === sourceId &&
-      entry.relation.origin === origin &&
-      normalizeDocumentWikiTitle(entry.relation.binding!.labelAtBinding) === normalizeDocumentWikiTitle(token.label)
-    ))
-  };
-  return addRelationToState(withoutPending, {
-    kind,
-    fromId: sourceId,
-    toId: targetId,
-    origin,
-    binding: wikiBindingForToken(token)
-  }, options);
-}
-
-export function rebindDocumentReference(
-  state: DashboardState,
-  relationId: string,
-  token: DocumentWikiLinkToken
-): { readonly state: DashboardState; readonly result: RelationMutationResult } {
-  const existing = state.objectGraph.relations.find((relation) => relation.id === relationId);
-  if (!existing || existing.origin === "manual") {
-    return {
-      state,
-      result: { status: "rejected", code: "missing_relation", message: "Wiki-связь не найдена." }
-    };
-  }
-  const expectedKind = existing.origin === "wiki-link" ? "link" : "embed";
-  if (token.kind !== expectedKind) {
-    return {
-      state,
-      result: { status: "rejected", code: "invalid_relation", message: "Тип wiki-связи изменился." }
-    };
-  }
-  const withoutExisting = removeRelationFromState(state, relationId);
-  return addRelationToState(withoutExisting, {
-    ...existing,
-    binding: wikiBindingForToken(token)
-  }, { now: existing.createdAt, idFactory: () => existing.id });
 }

@@ -33,7 +33,11 @@ import { createReflectionNote } from "../domain/reflections/reflectionNote";
 import { normalizeReflectionMemoryReferences } from "../domain/reflections/reflectionMemory";
 import { normalizeReflectionSuggestions } from "../domain/reflections/reflectionSuggestions";
 import { normalizeWidgetLayout } from "./widgetLayout";
-import { createEmptyObjectGraph, normalizeObjectGraph } from "../domain/objects/objectGraph";
+import {
+  createEmptyObjectGraph,
+  normalizeObjectGraph,
+  type ObjectRelation
+} from "../domain/objects/objectGraph";
 import {
   assertPersistedRelationEndpoints,
   quarantineDanglingRelations
@@ -45,6 +49,7 @@ const STORE_NAME = "app";
 const STATE_KEY = "dashboard-state";
 const PRE_V15_SAFETY_KEY = "dashboard-state-before-v15";
 const PRE_V16_SAFETY_KEY = "dashboard-state-before-v16";
+const EXPERIMENTAL_V16_SAFETY_KEY = "dashboard-state-before-computed-wiki-v16";
 const AUTO_BACKUP_INDEX_KEY = "dashboard-auto-backup-index";
 const AUTO_BACKUP_PREFIX = "dashboard-auto-backup:";
 const AUTO_BACKUP_INTERVAL_MS = 15 * 60 * 1000;
@@ -1004,6 +1009,7 @@ export function migrateState(candidate: MigrationCandidate): DashboardState {
     throw new Error(`Неподдерживаемая версия локальных данных: ${String(runtimeVersion)}.`);
   }
   if (runtimeVersion === 16) {
+    if (isExperimentalV16State(candidate)) return convertExperimentalV16(candidate);
     if (!isRecord(candidate) || !hasValidV16CanonicalData(candidate)) {
       throw new Error("Локальные данные v16 повреждены: автосохранение остановлено.");
     }
@@ -1022,37 +1028,87 @@ export function migrateState(candidate: MigrationCandidate): DashboardState {
   ));
 }
 
-function migrateManualRelation(value: unknown) {
-  if (!isRecord(value)) return value;
-  return { ...value, origin: "manual" as const };
+function relationBase(value: Record<string, unknown>): ObjectRelation {
+  return {
+    id: String(value.id),
+    kind: value.kind as ObjectRelation["kind"],
+    fromId: String(value.fromId),
+    toId: String(value.toId),
+    order: Number(value.order),
+    createdAt: String(value.createdAt)
+  };
+}
+
+function hasValidRelationBase(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) &&
+    isNonEmptyString(value.id) &&
+    ["contains", "links", "embeds"].includes(String(value.kind)) &&
+    isNonEmptyString(value.fromId) &&
+    isNonEmptyString(value.toId) &&
+    value.fromId !== value.toId &&
+    isFiniteInteger(value.order, 0) &&
+    isValidDateString(value.createdAt);
+}
+
+function hasValidExperimentalBinding(value: unknown): boolean {
+  return isRecord(value) &&
+    isNonEmptyString(value.labelAtBinding) &&
+    isFiniteInteger(value.occurrence, 0) &&
+    isFiniteInteger(value.lastKnownStart, 0) &&
+    isFiniteInteger(value.lastKnownEnd, 1) &&
+    Number(value.lastKnownEnd) > Number(value.lastKnownStart) &&
+    isNonEmptyString(value.contextFingerprint);
+}
+
+function toPlainSemanticRelation(
+  value: unknown,
+  allowExperimental: boolean
+): ObjectRelation | null {
+  if (!hasValidRelationBase(value)) {
+    throw new Error("Сохраняемая предметная связь повреждена.");
+  }
+  if (value.origin === undefined) {
+    if (value.binding !== undefined) throw new Error("Relation содержит binding без допустимого origin.");
+    return relationBase(value);
+  }
+  if (!allowExperimental) throw new Error("Relation содержит устаревший origin.");
+  if (value.origin === "manual") {
+    if (value.binding !== undefined) throw new Error("Manual relation не должна содержать binding.");
+    return relationBase(value);
+  }
+  if (value.origin !== "wiki-link" && value.origin !== "wiki-embed") {
+    throw new Error("Relation содержит неизвестный experimental origin.");
+  }
+  if ((value.origin === "wiki-link" && value.kind !== "links") ||
+    (value.origin === "wiki-embed" && value.kind !== "embeds") ||
+    !hasValidExperimentalBinding(value.binding)) {
+    throw new Error("Экспериментальная wiki relation повреждена.");
+  }
+  return null;
+}
+
+function migrateTrashRelations(
+  entry: unknown,
+  allowExperimental: boolean
+): TrashEntry {
+  if (!isRecord(entry) || !isRecord(entry.snapshot)) return entry as TrashEntry;
+  if (entry.snapshot.kind !== "note" && entry.snapshot.kind !== "object") return entry as unknown as TrashEntry;
+  const rawRelations = Array.isArray(entry.snapshot.relations) ? entry.snapshot.relations : [];
+  return {
+    ...entry,
+    snapshot: {
+      ...entry.snapshot,
+      relations: rawRelations.flatMap((relation) => {
+        const converted = toPlainSemanticRelation(relation, allowExperimental);
+        return converted ? [converted] : [];
+      })
+    }
+  } as unknown as TrashEntry;
 }
 
 function upgradeV15ToV16(candidate: DashboardStateV15): DashboardState {
   const objectGraph = normalizeObjectGraph(candidate.objectGraph);
-  const trash = candidate.trash.map((entry) => {
-    if (!isRecord(entry) || !isRecord(entry.snapshot)) return entry as unknown as TrashEntry;
-    if (entry.snapshot.kind === "note") {
-      return {
-        ...entry,
-        snapshot: {
-          ...entry.snapshot,
-          relations: Array.isArray(entry.snapshot.relations)
-            ? entry.snapshot.relations.map(migrateManualRelation)
-            : []
-        }
-      } as unknown as TrashEntry;
-    }
-    if (entry.snapshot.kind === "object" && Array.isArray(entry.snapshot.relations)) {
-      return {
-        ...entry,
-        snapshot: {
-          ...entry.snapshot,
-          relations: entry.snapshot.relations.map(migrateManualRelation)
-        }
-      } as unknown as TrashEntry;
-    }
-    return entry as unknown as TrashEntry;
-  });
+  const trash = candidate.trash.map((entry) => migrateTrashRelations(entry, false));
   const state = quarantineDanglingRelations({
     ...candidate,
     version: 16,
@@ -1061,6 +1117,87 @@ function upgradeV15ToV16(candidate: DashboardStateV15): DashboardState {
     pendingRelations: [],
     widgets: normalizeWidgets(candidate.widgets, false)
   }, candidate.updatedAt);
+  assertPersistedRelationEndpoints(state);
+  return state;
+}
+
+function persistedRelationValues(candidate: Record<string, unknown>): unknown[] {
+  const values: unknown[] = [];
+  if (isRecord(candidate.objectGraph) && Array.isArray(candidate.objectGraph.relations)) {
+    values.push(...candidate.objectGraph.relations);
+  }
+  if (Array.isArray(candidate.trash)) {
+    candidate.trash.forEach((entry) => {
+      if (isRecord(entry) && isRecord(entry.snapshot) && Array.isArray(entry.snapshot.relations)) {
+        values.push(...entry.snapshot.relations);
+      }
+    });
+  }
+  if (Array.isArray(candidate.pendingRelations)) {
+    candidate.pendingRelations.forEach((entry) => {
+      if (isRecord(entry)) values.push(entry.relation);
+    });
+  }
+  return values;
+}
+
+export function isExperimentalV16State(candidate: unknown): boolean {
+  if (!isRecord(candidate) || candidate.version !== 16) return false;
+  if (Array.isArray(candidate.pendingRelations) && candidate.pendingRelations.some((entry) =>
+    isRecord(entry) && entry.reason === "binding-ambiguous"
+  )) return true;
+  return persistedRelationValues(candidate).some((relation) =>
+    isRecord(relation) && (relation.origin !== undefined || relation.binding !== undefined)
+  );
+}
+
+export function migrationSafetyBackupKey(candidate: unknown): string | null {
+  if (!isRecord(candidate)) return null;
+  const version = Number(candidate.version);
+  if (version <= 14) return PRE_V15_SAFETY_KEY;
+  if (version === 15) return PRE_V16_SAFETY_KEY;
+  if (isExperimentalV16State(candidate)) return EXPERIMENTAL_V16_SAFETY_KEY;
+  return null;
+}
+
+export function shouldCreateMigrationSafetyBackup(existing: unknown): boolean {
+  return existing === undefined;
+}
+
+function convertExperimentalV16(candidate: MigrationCandidate): DashboardState {
+  if (!isRecord(candidate) || !isRecord(candidate.objectGraph) ||
+    !Array.isArray(candidate.objectGraph.relations) || !Array.isArray(candidate.pendingRelations) ||
+    !Array.isArray(candidate.trash)) {
+    throw new Error("Экспериментальные локальные данные v16 повреждены: преобразование остановлено.");
+  }
+
+  const semanticRelations = candidate.objectGraph.relations.flatMap((relation) => {
+    const converted = toPlainSemanticRelation(relation, true);
+    return converted ? [converted] : [];
+  });
+  const trash = candidate.trash.map((entry) => migrateTrashRelations(entry, true));
+  const pendingRelations = candidate.pendingRelations.flatMap((entry) => {
+    if (!isRecord(entry) || !isValidDateString(entry.capturedAt) ||
+      !["missing-from", "missing-to", "missing-endpoints", "invariant-rejected", "binding-ambiguous"]
+        .includes(String(entry.reason))) {
+      throw new Error("Экспериментальная pending relation повреждена.");
+    }
+    const converted = toPlainSemanticRelation(entry.relation, true);
+    if (entry.reason === "binding-ambiguous" || !converted) return [];
+    return [{ relation: converted, reason: entry.reason, capturedAt: entry.capturedAt }];
+  });
+  const converted = {
+    ...candidate,
+    version: 16 as const,
+    objectGraph: normalizeObjectGraph({ ...candidate.objectGraph, relations: semanticRelations }),
+    trash,
+    pendingRelations,
+    widgets: normalizeWidgets(candidate.widgets as DashboardWidget[], false)
+  };
+  if (!hasValidV16CanonicalData(converted)) {
+    throw new Error("Экспериментальные локальные данные v16 невозможно безопасно преобразовать.");
+  }
+  const state = converted as DashboardState;
   assertPersistedRelationEndpoints(state);
   return state;
 }
@@ -1089,26 +1226,30 @@ export async function loadState(): Promise<DashboardState | null> {
     let failure: unknown = null;
     request.onsuccess = () => {
       const result = request.result as MigrationCandidate | undefined;
-      try {
-        loaded = result ? migrateState(result) : null;
-      } catch (error) {
-        failure = error;
-        transaction.abort();
-        return;
-      }
-      const version = result ? Number((result as { version?: unknown }).version) : null;
-      if (result && version !== null && version <= 15) {
-        const safetyKey = version <= 14 ? PRE_V15_SAFETY_KEY : PRE_V16_SAFETY_KEY;
+      const safetyKey = result ? migrationSafetyBackupKey(result) : null;
+      const migrate = () => {
+        try {
+          loaded = result ? migrateState(result) : null;
+        } catch (error) {
+          failure = error;
+        }
+      };
+      if (result && safetyKey) {
         const safetyRequest = store.get(safetyKey);
         safetyRequest.onsuccess = () => {
-          if (safetyRequest.result === undefined) store.put(result, safetyKey);
+          if (shouldCreateMigrationSafetyBackup(safetyRequest.result)) store.put(result, safetyKey);
+          migrate();
         };
+        safetyRequest.onerror = () => { failure = safetyRequest.error; };
+      } else {
+        migrate();
       }
     };
     request.onerror = () => { failure = request.error; };
     transaction.oncomplete = () => {
       database.close();
-      resolve(loaded);
+      if (failure) reject(failure);
+      else resolve(loaded);
     };
     transaction.onerror = () => {
       database.close();
@@ -1865,26 +2006,15 @@ function hasValidV15CanonicalData(candidate: Record<string, unknown>): boolean {
   return true;
 }
 
-function hasExplicitRelationOrigin(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.origin === "manual") return value.binding === undefined;
-  if (value.origin !== "wiki-link" && value.origin !== "wiki-embed") return false;
-  if ((value.origin === "wiki-link" && value.kind !== "links") ||
-    (value.origin === "wiki-embed" && value.kind !== "embeds") ||
-    !isRecord(value.binding)) return false;
-  return isNonEmptyString(value.binding.labelAtBinding) &&
-    isFiniteInteger(value.binding.occurrence, 0) &&
-    isFiniteInteger(value.binding.lastKnownStart, 0) &&
-    isFiniteInteger(value.binding.lastKnownEnd, 1) &&
-    Number(value.binding.lastKnownEnd) > Number(value.binding.lastKnownStart) &&
-    isNonEmptyString(value.binding.contextFingerprint);
+function hasPlainSemanticRelationShape(value: unknown): boolean {
+  return hasValidRelationBase(value) && value.origin === undefined && value.binding === undefined;
 }
 
 function trashRelationsHaveV16Shape(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.snapshot)) return false;
   if (value.snapshot.kind !== "note" && value.snapshot.kind !== "object") return true;
   return Array.isArray(value.snapshot.relations) &&
-    value.snapshot.relations.every(hasExplicitRelationOrigin);
+    value.snapshot.relations.every(hasPlainSemanticRelationShape);
 }
 
 function hasValidV16CanonicalData(candidate: Record<string, unknown>): boolean {
@@ -1893,13 +2023,18 @@ function hasValidV16CanonicalData(candidate: Record<string, unknown>): boolean {
     candidate.version !== 16 ||
     !Array.isArray(candidate.trash) || !candidate.trash.every(trashRelationsHaveV16Shape) ||
     !isRecord(candidate.objectGraph) || !Array.isArray(candidate.objectGraph.relations) ||
-    !candidate.objectGraph.relations.every(hasExplicitRelationOrigin) ||
+    !candidate.objectGraph.relations.every(hasPlainSemanticRelationShape) ||
     !Array.isArray(candidate.pendingRelations)) return false;
-  return candidate.pendingRelations.every((entry) => (
+  const pendingIds = candidate.pendingRelations.flatMap((entry) =>
+    isRecord(entry) && isRecord(entry.relation) && typeof entry.relation.id === "string"
+      ? [entry.relation.id]
+      : []
+  );
+  return new Set(pendingIds).size === pendingIds.length && candidate.pendingRelations.every((entry) => (
     isRecord(entry) &&
-    ["missing-from", "missing-to", "missing-endpoints", "invariant-rejected", "binding-ambiguous"].includes(String(entry.reason)) &&
+    ["missing-from", "missing-to", "missing-endpoints", "invariant-rejected"].includes(String(entry.reason)) &&
     isValidDateString(entry.capturedAt) &&
-    hasExplicitRelationOrigin(entry.relation)
+    hasPlainSemanticRelationShape(entry.relation)
   ));
 }
 
@@ -2032,7 +2167,9 @@ export async function readBackup(file: File): Promise<DashboardState> {
     (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>)) ||
     (candidate.version === 14 && !isValidV14Backup(candidate as Record<string, unknown>)) ||
     (candidate.version === 15 && !hasValidV15CanonicalData(candidate as Record<string, unknown>)) ||
-    (candidate.version === 16 && !hasValidV16CanonicalData(candidate as Record<string, unknown>))
+    (candidate.version === 16 &&
+      !hasValidV16CanonicalData(candidate as Record<string, unknown>) &&
+      !isExperimentalV16State(candidate))
   ) {
     throw new Error("Файл не похож на резервную копию командного центра.");
   }

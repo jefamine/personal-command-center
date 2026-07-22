@@ -4607,6 +4607,8 @@ body {
   text-align: left;
 }
 .workspace-link-chooser > div > button:hover { background: var(--surface-strong); }
+.workspace-link-chooser > div > button:disabled { cursor: not-allowed; opacity: 0.62; }
+.workspace-link-chooser > div > button:disabled:hover { background: transparent; }
 .workspace-link-chooser > div > button span { display: grid; gap: 1px; }
 .workspace-link-chooser > div > button strong { font-size: calc(8px * var(--font-scale)); }
 .workspace-link-chooser > div > button small,
