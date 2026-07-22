@@ -135,6 +135,43 @@ export interface RestoreStoredDocumentCommand {
   readonly alternativeRelativePath?: string;
 }
 
+export interface MakeStoredDocumentManagedCommand {
+  readonly reference: DocumentStorageReference;
+  readonly documentId?: DocumentId;
+}
+
+export interface SaveStoredDocumentConflictCopyCommand {
+  readonly reference: DocumentStorageReference;
+  readonly body: string;
+}
+
+export interface PurgeStoredDocumentCommand {
+  readonly workspaceId: string;
+  readonly tombstoneId: string;
+}
+
+export interface CreateStoredFolderCommand {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+}
+
+export interface RenameStoredFolderCommand {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly nextName: string;
+}
+
+export interface MoveStoredFolderCommand {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly destinationFolder: string;
+}
+
+export interface StoredFolderOperation {
+  readonly relativePath: string;
+  readonly affectedDocuments: readonly string[];
+}
+
 export type DocumentStorageErrorCode =
   | "unsupported"
   | "permission-denied"
@@ -155,6 +192,9 @@ export interface DocumentStorageFailure {
   readonly message: string;
   readonly relativePath?: string;
   readonly current?: StoredDocument;
+  /** Paths involved in a reported partial multi-file operation. */
+  readonly affectedPaths?: readonly string[];
+  readonly recoveryRequired?: boolean;
 }
 
 export type DocumentStorageResult<T> =
@@ -178,4 +218,10 @@ export interface DocumentStorageAdapter {
   moveDocument(command: MoveStoredDocumentCommand): Promise<DocumentStorageResult<StoredDocument>>;
   deleteDocument(command: DeleteStoredDocumentCommand): Promise<DocumentStorageResult<DeletedStoredDocument>>;
   restoreDocument(command: RestoreStoredDocumentCommand): Promise<DocumentStorageResult<StoredDocument>>;
+  makeDocumentManaged(command: MakeStoredDocumentManagedCommand): Promise<DocumentStorageResult<StoredDocument>>;
+  saveConflictCopy(command: SaveStoredDocumentConflictCopyCommand): Promise<DocumentStorageResult<StoredDocument>>;
+  purgeDocument(command: PurgeStoredDocumentCommand): Promise<DocumentStorageResult<DeletedStoredDocument>>;
+  createFolder(command: CreateStoredFolderCommand): Promise<DocumentStorageResult<StoredFolderOperation>>;
+  renameFolder(command: RenameStoredFolderCommand): Promise<DocumentStorageResult<StoredFolderOperation>>;
+  moveFolder(command: MoveStoredFolderCommand): Promise<DocumentStorageResult<StoredFolderOperation>>;
 }
