@@ -38,9 +38,12 @@ import {
   normalizeObjectGraph,
   type ObjectRelation
 } from "../domain/objects/objectGraph";
+import { legacyObjectReference } from "../domain/objects/legacyAdapter";
 import {
   assertPersistedRelationEndpoints,
-  quarantineDanglingRelations
+  liveRelationEndpointIds,
+  quarantineDanglingRelations,
+  trashEntryRelationEndpointIds
 } from "../domain/relations/relationRepository";
 
 const DB_NAME = "personal-command-center";
@@ -1010,12 +1013,21 @@ export function migrateState(candidate: MigrationCandidate): DashboardState {
   }
   if (runtimeVersion === 16) {
     if (isExperimentalV16State(candidate)) return convertExperimentalV16(candidate);
-    if (!isRecord(candidate) || !hasValidV16CanonicalData(candidate)) {
+    if (!isRecord(candidate) || !hasValidV15CanonicalData({ ...candidate, version: 15 }) ||
+      !Array.isArray(candidate.trash) || !Array.isArray(candidate.pendingRelations)) {
       throw new Error("Локальные данные v16 повреждены: автосохранение остановлено.");
     }
-    const state = candidate as DashboardState;
+    const trash = candidate.trash.map((entry) => migrateTrashRelations(entry, false));
+    const state = normalizeTaskEventRelationLifecycle({
+      ...candidate,
+      trash,
+      widgets: normalizeWidgets(candidate.widgets as DashboardWidget[], false)
+    } as DashboardState);
+    if (!hasValidV16CanonicalData(state)) {
+      throw new Error("Локальные данные v16 повреждены: автосохранение остановлено.");
+    }
     assertPersistedRelationEndpoints(state);
-    return { ...state, widgets: normalizeWidgets(state.widgets, false) };
+    return state;
   }
   if (runtimeVersion === 15) {
     if (!isRecord(candidate) || !hasValidV15CanonicalData(candidate)) {
@@ -1092,7 +1104,9 @@ function migrateTrashRelations(
   allowExperimental: boolean
 ): TrashEntry {
   if (!isRecord(entry) || !isRecord(entry.snapshot)) return entry as TrashEntry;
-  if (entry.snapshot.kind !== "note" && entry.snapshot.kind !== "object") return entry as unknown as TrashEntry;
+  if (!["task", "note", "event", "object"].includes(String(entry.snapshot.kind))) {
+    return entry as unknown as TrashEntry;
+  }
   const rawRelations = Array.isArray(entry.snapshot.relations) ? entry.snapshot.relations : [];
   return {
     ...entry,
@@ -1106,17 +1120,76 @@ function migrateTrashRelations(
   } as unknown as TrashEntry;
 }
 
+function sameRelation(left: ObjectRelation, right: ObjectRelation): boolean {
+  return left.id === right.id && left.kind === right.kind && left.fromId === right.fromId &&
+    left.toId === right.toId && left.order === right.order && left.createdAt === right.createdAt;
+}
+
+/**
+ * Repairs the short-lived v16 shape that could leave Task/Event relations in
+ * the live graph after their endpoints had already moved to trash.
+ */
+function normalizeTaskEventRelationLifecycle(state: DashboardState): DashboardState {
+  const trash = state.trash.map((entry) => ({
+    ...entry,
+    snapshot: "relations" in entry.snapshot
+      ? { ...entry.snapshot, relations: [...entry.snapshot.relations] }
+      : entry.snapshot
+  })) as TrashEntry[];
+  const tombstoneOwner = new Map<string, number>();
+  trash.forEach((entry, index) => {
+    if (entry.snapshot.kind !== "task" && entry.snapshot.kind !== "event") return;
+    trashEntryRelationEndpointIds(entry).forEach((endpointId) => {
+      if (!tombstoneOwner.has(endpointId)) tombstoneOwner.set(endpointId, index);
+    });
+  });
+  if (!tombstoneOwner.size) return { ...state, trash };
+
+  const liveEndpoints = liveRelationEndpointIds({ ...state, trash });
+  const liveRelations: ObjectRelation[] = [];
+  state.objectGraph.relations.forEach((relation) => {
+    const missingEndpoints = [relation.fromId, relation.toId].filter((id) => !liveEndpoints.has(id));
+    const ownerIndex = missingEndpoints
+      .map((id) => tombstoneOwner.get(id))
+      .find((index): index is number => index !== undefined);
+    if (ownerIndex === undefined) {
+      liveRelations.push(relation);
+      return;
+    }
+
+    const owner = trash[ownerIndex];
+    if (owner.snapshot.kind !== "task" && owner.snapshot.kind !== "event") {
+      throw new Error("Relation tombstone имеет недопустимый тип.");
+    }
+    const existing = owner.snapshot.relations.find((entry) => entry.id === relation.id);
+    if (existing && !sameRelation(existing, relation)) {
+      throw new Error(`Relation ${relation.id} конфликтует со снимком корзины.`);
+    }
+    if (!existing) owner.snapshot.relations.push(relation);
+  });
+
+  return {
+    ...state,
+    trash,
+    objectGraph: { ...state.objectGraph, relations: liveRelations }
+  };
+}
+
 function upgradeV15ToV16(candidate: DashboardStateV15): DashboardState {
   const objectGraph = normalizeObjectGraph(candidate.objectGraph);
   const trash = candidate.trash.map((entry) => migrateTrashRelations(entry, false));
-  const state = quarantineDanglingRelations({
+  const normalized = normalizeTaskEventRelationLifecycle({
     ...candidate,
     version: 16,
     objectGraph,
     trash,
     pendingRelations: [],
     widgets: normalizeWidgets(candidate.widgets, false)
-  }, candidate.updatedAt);
+  });
+  const state = quarantineDanglingRelations(normalized, candidate.updatedAt);
+  if (!hasValidV16CanonicalData(state)) {
+    throw new Error("Локальные данные v15 невозможно безопасно преобразовать в v16.");
+  }
   assertPersistedRelationEndpoints(state);
   return state;
 }
@@ -1186,14 +1259,14 @@ function convertExperimentalV16(candidate: MigrationCandidate): DashboardState {
     if (entry.reason === "binding-ambiguous" || !converted) return [];
     return [{ relation: converted, reason: entry.reason, capturedAt: entry.capturedAt }];
   });
-  const converted = {
+  const converted = normalizeTaskEventRelationLifecycle({
     ...candidate,
     version: 16 as const,
     objectGraph: normalizeObjectGraph({ ...candidate.objectGraph, relations: semanticRelations }),
     trash,
     pendingRelations,
     widgets: normalizeWidgets(candidate.widgets as DashboardWidget[], false)
-  };
+  } as DashboardState);
   if (!hasValidV16CanonicalData(converted)) {
     throw new Error("Экспериментальные локальные данные v16 невозможно безопасно преобразовать.");
   }
@@ -2006,18 +2079,46 @@ function hasValidV15CanonicalData(candidate: Record<string, unknown>): boolean {
   return true;
 }
 
-function hasPlainSemanticRelationShape(value: unknown): boolean {
+function hasPlainSemanticRelationShape(value: unknown): value is Record<string, unknown> {
   return hasValidRelationBase(value) && value.origin === undefined && value.binding === undefined;
 }
 
 function trashRelationsHaveV16Shape(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.snapshot)) return false;
-  if (value.snapshot.kind !== "note" && value.snapshot.kind !== "object") return true;
-  return Array.isArray(value.snapshot.relations) &&
-    value.snapshot.relations.every(hasPlainSemanticRelationShape);
+  const snapshot = value.snapshot;
+  let endpointIds: Set<string>;
+  if (snapshot.kind === "task" && isRecord(snapshot.task) && isNonEmptyString(snapshot.task.id) &&
+    Array.isArray(snapshot.linkedEvents)) {
+    const eventIds = snapshot.linkedEvents.flatMap((event) =>
+      isRecord(event) && isNonEmptyString(event.id)
+        ? [legacyObjectReference("event", event.id)]
+        : []
+    );
+    if (eventIds.length !== snapshot.linkedEvents.length) return false;
+    endpointIds = new Set([legacyObjectReference("task", snapshot.task.id), ...eventIds]);
+  } else if (snapshot.kind === "event" && isRecord(snapshot.event) && isNonEmptyString(snapshot.event.id)) {
+    endpointIds = new Set([legacyObjectReference("event", snapshot.event.id)]);
+  } else if (snapshot.kind === "note" && isRecord(snapshot.note) && isNonEmptyString(snapshot.note.id)) {
+    endpointIds = new Set([legacyObjectReference("note", snapshot.note.id)]);
+  } else if (snapshot.kind === "object" && isRecord(snapshot.object) && isNonEmptyString(snapshot.object.id)) {
+    endpointIds = new Set([snapshot.object.id]);
+  } else {
+    return false;
+  }
+  if (!Array.isArray(snapshot.relations)) return false;
+  const relationIds = snapshot.relations.flatMap((relation) =>
+    isRecord(relation) && typeof relation.id === "string" ? [relation.id] : []
+  );
+  return relationIds.length === snapshot.relations.length &&
+    new Set(relationIds).size === relationIds.length &&
+    snapshot.relations.every((relation) =>
+      hasPlainSemanticRelationShape(relation) &&
+      (endpointIds.has(relation.fromId as string) || endpointIds.has(relation.toId as string))
+    );
 }
 
-function hasValidV16CanonicalData(candidate: Record<string, unknown>): boolean {
+function hasValidV16CanonicalData(candidate: unknown): boolean {
+  if (!isRecord(candidate)) return false;
   const asV15 = { ...candidate, version: 15 };
   if (!hasValidV15CanonicalData(asV15) ||
     candidate.version !== 16 ||
@@ -2036,6 +2137,15 @@ function hasValidV16CanonicalData(candidate: Record<string, unknown>): boolean {
     isValidDateString(entry.capturedAt) &&
     hasPlainSemanticRelationShape(entry.relation)
   ));
+}
+
+function isValidV16Backup(candidate: unknown): boolean {
+  try {
+    migrateState(candidate as MigrationCandidate);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function hasValidCanonicalData(candidate: Record<string, unknown>, expectedVersion: 13 | 14): boolean {
@@ -2167,9 +2277,7 @@ export async function readBackup(file: File): Promise<DashboardState> {
     (candidate.version === 13 && !isValidV13Backup(candidate as Record<string, unknown>)) ||
     (candidate.version === 14 && !isValidV14Backup(candidate as Record<string, unknown>)) ||
     (candidate.version === 15 && !hasValidV15CanonicalData(candidate as Record<string, unknown>)) ||
-    (candidate.version === 16 &&
-      !hasValidV16CanonicalData(candidate as Record<string, unknown>) &&
-      !isExperimentalV16State(candidate))
+    (candidate.version === 16 && !isValidV16Backup(candidate))
   ) {
     throw new Error("Файл не похож на резервную копию командного центра.");
   }

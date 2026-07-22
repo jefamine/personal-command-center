@@ -65,6 +65,7 @@ export function appendEntityRevision(
 export function taskTrashEntry(
   task: Task,
   linkedEvents: CalendarEvent[],
+  relations: ObjectRelation[] = [],
   deletedAt = new Date().toISOString(),
   id: string = crypto.randomUUID()
 ): TrashEntry {
@@ -74,7 +75,7 @@ export function taskTrashEntry(
     entityKind: "task",
     title: task.title,
     deletedAt,
-    snapshot: { kind: "task", task, linkedEvents }
+    snapshot: { kind: "task", task, linkedEvents, relations }
   };
 }
 
@@ -96,6 +97,7 @@ export function noteTrashEntry(
 
 export function eventTrashEntry(
   event: CalendarEvent,
+  relations: ObjectRelation[] = [],
   deletedAt = new Date().toISOString(),
   id: string = crypto.randomUUID()
 ): TrashEntry {
@@ -105,7 +107,7 @@ export function eventTrashEntry(
     entityKind: "event",
     title: event.title,
     deletedAt,
-    snapshot: { kind: "event", event }
+    snapshot: { kind: "event", event, relations }
   };
 }
 

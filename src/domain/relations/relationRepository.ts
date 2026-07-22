@@ -83,8 +83,18 @@ export function captureRelationsForDeletion(
   state: DashboardState,
   endpointId: string
 ): CapturedRelations {
+  return captureRelationsForEndpointSet(state, [endpointId]);
+}
+
+/** Atomically removes every persisted relation touching any endpoint in the set. */
+export function captureRelationsForEndpointSet(
+  state: DashboardState,
+  endpointIds: Iterable<string>
+): CapturedRelations {
+  const endpoints = new Set(endpointIds);
+  if (!endpoints.size) return { state, relations: [] };
   const relations = state.objectGraph.relations.filter((relation) =>
-    relation.fromId === endpointId || relation.toId === endpointId
+    endpoints.has(relation.fromId) || endpoints.has(relation.toId)
   );
   if (!relations.length) return { state, relations };
   const capturedIds = new Set(relations.map((relation) => relation.id));
@@ -189,12 +199,15 @@ export function purgeRelationsForEndpoints(
   };
 }
 
-export function trashEntryRelationEndpointId(entry: TrashEntry): string {
+export function trashEntryRelationEndpointIds(entry: TrashEntry): readonly string[] {
   const snapshot = entry.snapshot;
-  if (snapshot.kind === "note") return noteDocumentId(snapshot.note.id);
-  if (snapshot.kind === "object") return snapshot.object.id;
-  if (snapshot.kind === "task") return legacyObjectReference("task", snapshot.task.id);
-  return legacyObjectReference("event", snapshot.event.id);
+  if (snapshot.kind === "note") return [noteDocumentId(snapshot.note.id)];
+  if (snapshot.kind === "object") return [snapshot.object.id];
+  if (snapshot.kind === "event") return [legacyObjectReference("event", snapshot.event.id)];
+  return [
+    legacyObjectReference("task", snapshot.task.id),
+    ...snapshot.linkedEvents.map((event) => legacyObjectReference("event", event.id))
+  ];
 }
 
 export function quarantineDanglingRelations(

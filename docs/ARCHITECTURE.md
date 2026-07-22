@@ -232,10 +232,10 @@ Google Calendar, Google Tasks, Obsidian, файловый мост Codex и бу
 
 ## 12. Защита данных
 
-Загрузка v16 работает fail-closed: неизвестная версия, повреждённая semantic relation или dangling relation в live store останавливают автосохранение. Перед миграциями v14→v15 и v15→v16 сохраняются отдельные safety-копии. v15 relations мигрируют как plain semantic relations; отсутствующие endpoints переносятся в явную очередь восстановления. Экспериментальная v16 с per-token `origin`/`binding` получает отдельную неперезаписываемую safety-копию: manual relations становятся plain, вычисляемые wiki relations удаляются из graph/trash/pending и заново выводятся из неизменённого текста.
+Загрузка v16 работает fail-closed: неизвестная версия, повреждённая semantic relation или необъяснимый dangling relation в live store останавливают автосохранение. Relations, оставшиеся из-за прежнего удаления Task/Event и однозначно указывающие на их tombstone, сначала возвращаются в соответствующий снимок корзины. Перед миграциями v14→v15 и v15→v16 сохраняются отдельные safety-копии. v15 relations мигрируют как plain semantic relations; отсутствующие endpoints переносятся в явную очередь восстановления. Экспериментальная v16 с per-token `origin`/`binding` получает отдельную неперезаписываемую safety-копию: manual relations становятся plain, вычисляемые wiki relations удаляются из graph/trash/pending и заново выводятся из неизменённого текста.
 
 - `trash` хранит типизированные снимки удалённых сущностей;
-- снимок Note или native-объекта сохраняет все входящие и исходящие persisted relations;
+- снимки Note, native-объекта, Task и Event сохраняют все входящие и исходящие persisted relations; Task хранит их вместе со всеми удалёнными linked events;
 - `pendingRelations` хранит relations, которые пока нельзя безопасно вернуть в live store;
 - `revisionHistory` содержит до 200 точек возврата;
 - близкие правки одной сущности объединяются в пятиминутное окно;

@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { createInitialState } from "../data/seed";
 import { noteDocumentId } from "../domain/documents/documentContract";
 import { addUniversalObject, createUniversalObject } from "../domain/objects/objectGraph";
-import type { DashboardState, Note } from "../types";
+import { legacyObjectReference } from "../domain/objects/legacyAdapter";
+import type { CalendarEvent, DashboardState, Note } from "../types";
 import {
   isExperimentalV16State,
   migrateState,
@@ -41,6 +42,14 @@ function binding(label = "legacy-note") {
     lastKnownStart: 0,
     lastKnownEnd: label.length + 4,
     contextFingerprint: "fnv1a:test"
+  };
+}
+
+function linkedEvent(taskId: string): CalendarEvent {
+  return {
+    id: "legacy-event", title: "Событие", startAt: now,
+    endAt: "2026-07-22T10:00:00.000Z", kind: "focus", source: "dashboard",
+    taskId, notes: "", locked: true, createdAt: now, updatedAt: now
   };
 }
 
@@ -97,6 +106,29 @@ describe("final schema migration v15 → v16", () => {
     expect(migrated.trash[0].snapshot).toMatchObject({ kind: "note", relations: [] });
   });
 
+  it("adds empty relations arrays to old v15 Task and Event tombstones", () => {
+    const current = stateWithEndpoints();
+    const task = current.tasks[0];
+    const event = linkedEvent(task.id);
+    const trash = [
+      {
+        id: "task-trash", entityId: task.id, entityKind: "task", title: task.title, deletedAt: now,
+        snapshot: { kind: "task", task, linkedEvents: [event] }
+      },
+      {
+        id: "event-trash", entityId: event.id, entityKind: "event", title: event.title, deletedAt: now,
+        snapshot: { kind: "event", event }
+      }
+    ];
+    const migrated = migrateState({
+      ...asV15(current), tasks: current.tasks.slice(1), events: [], trash
+    } as never);
+    expect(migrated.trash.map((entry) => entry.snapshot)).toMatchObject([
+      { kind: "task", relations: [] },
+      { kind: "event", relations: [] }
+    ]);
+  });
+
   it("rejects unknown versions and fails closed on a damaged semantic relation", () => {
     expect(() => migrateState({ ...createInitialState(), version: 17 } as never))
       .toThrow(/Неподдерживаемая версия/u);
@@ -108,6 +140,115 @@ describe("final schema migration v15 → v16", () => {
       }]
     };
     expect(() => migrateState(damaged)).toThrow(/повреждены/u);
+  });
+});
+
+describe("stored final v16 legacy tombstone normalization", () => {
+  it("normalizes old Task/Event snapshots and moves their dangling relations into trash", () => {
+    const current = stateWithEndpoints();
+    const task = current.tasks[0];
+    const event = linkedEvent(task.id);
+    const taskId = legacyObjectReference("task", task.id);
+    const eventId = legacyObjectReference("event", event.id);
+    const migrated = migrateState({
+      ...current,
+      tasks: current.tasks.slice(1),
+      events: [],
+      trash: [
+        {
+          id: "task-trash", entityId: task.id, entityKind: "task", title: task.title, deletedAt: now,
+          snapshot: { kind: "task", task, linkedEvents: [event] }
+        },
+        {
+          id: "event-trash", entityId: "other-event", entityKind: "event", title: "Другое", deletedAt: now,
+          snapshot: { kind: "event", event: { ...event, id: "other-event", taskId: null } }
+        }
+      ],
+      objectGraph: {
+        ...current.objectGraph,
+        relations: [
+          { id: "task-dangling", kind: "links", fromId: "native", toId: taskId, order: 0, createdAt: now },
+          { id: "event-dangling", kind: "embeds", fromId: eventId, toId: "native", order: 0, createdAt: now }
+        ]
+      }
+    } as never);
+
+    expect(migrated.objectGraph.relations).toEqual([]);
+    expect(migrated.trash[0].snapshot).toMatchObject({
+      kind: "task",
+      relations: [
+        expect.objectContaining({ id: "task-dangling" }),
+        expect.objectContaining({ id: "event-dangling" })
+      ]
+    });
+    expect(migrated.trash[1].snapshot).toMatchObject({ kind: "event", relations: [] });
+    expect(migrateState(migrated)).toEqual(migrated);
+  });
+
+  it("normalizes an old Event snapshot and moves its dangling relation into that snapshot", () => {
+    const current = stateWithEndpoints();
+    const event = linkedEvent(current.tasks[0].id);
+    const eventId = legacyObjectReference("event", event.id);
+    const migrated = migrateState({
+      ...current,
+      events: [],
+      trash: [{
+        id: "event-trash", entityId: event.id, entityKind: "event", title: event.title, deletedAt: now,
+        snapshot: { kind: "event", event }
+      }],
+      objectGraph: {
+        ...current.objectGraph,
+        relations: [{
+          id: "event-dangling", kind: "links", fromId: "native", toId: eventId,
+          order: 0, createdAt: now
+        }]
+      }
+    } as never);
+    expect(migrated.objectGraph.relations).toEqual([]);
+    expect(migrated.trash[0].snapshot).toMatchObject({
+      kind: "event", relations: [expect.objectContaining({ id: "event-dangling" })]
+    });
+  });
+
+  it("does not silently discard a dangling relation unknown to live catalog and tombstones", () => {
+    const current = stateWithEndpoints();
+    const relation = {
+      id: "unknown-dangling", kind: "links", fromId: "native", toId: "missing",
+      order: 0, createdAt: now
+    } as const;
+    expect(() => migrateState({
+      ...current,
+      objectGraph: { ...current.objectGraph, relations: [relation] }
+    } as never)).toThrow();
+    expect(relation.toId).toBe("missing");
+  });
+
+  it("fails closed for invalid or duplicate Task snapshot relations", () => {
+    const current = stateWithEndpoints();
+    const task = current.tasks[0];
+    const valid = {
+      id: "duplicate", kind: "links", fromId: legacyObjectReference("task", task.id),
+      toId: "native", order: 0, createdAt: now
+    } as const;
+    const base = {
+      ...current,
+      tasks: current.tasks.slice(1),
+      trash: [{
+        id: "task-trash", entityId: task.id, entityKind: "task", title: task.title, deletedAt: now,
+        snapshot: { kind: "task", task, linkedEvents: [], relations: [valid, valid] }
+      }]
+    };
+    expect(() => migrateState(base as never)).toThrow(/повреждены/u);
+    expect(() => migrateState({
+      ...base,
+      trash: [{
+        ...base.trash[0],
+        snapshot: {
+          ...base.trash[0].snapshot,
+          relations: [{ ...valid, id: "unrelated", fromId: "native", toId: "missing" }]
+        }
+      }]
+    } as never)).toThrow(/повреждены/u);
   });
 });
 
@@ -210,6 +351,41 @@ describe("experimental v16 → final v16 compatibility", () => {
     const experimental = experimentalState();
     const originalText = experimental.notes[0].body;
     expect(migrateState(experimental as never).notes[0].body).toBe(originalText);
+  });
+
+  it("normalizes experimental Task/Event tombstones and keeps their manual relations plain", () => {
+    const experimental = experimentalState();
+    const task = experimental.tasks[0];
+    const event = linkedEvent(task.id);
+    const migrated = migrateState({
+      ...experimental,
+      tasks: experimental.tasks.slice(1),
+      trash: [
+        ...experimental.trash,
+        {
+          id: "task-trash", entityId: task.id, entityKind: "task", title: task.title, deletedAt: now,
+          snapshot: {
+            kind: "task", task, linkedEvents: [event], relations: [{
+              id: "task-manual", kind: "links",
+              fromId: legacyObjectReference("task", task.id), toId: "native",
+              order: 0, createdAt: now, origin: "manual"
+            }]
+          }
+        },
+        {
+          id: "event-trash", entityId: "other-event", entityKind: "event", title: "Другое", deletedAt: now,
+          snapshot: { kind: "event", event: { ...event, id: "other-event", taskId: null } }
+        }
+      ]
+    } as never);
+    const taskSnapshot = migrated.trash.find((entry) => entry.id === "task-trash")?.snapshot;
+    const eventSnapshot = migrated.trash.find((entry) => entry.id === "event-trash")?.snapshot;
+    expect(taskSnapshot).toMatchObject({
+      kind: "task", relations: [expect.objectContaining({ id: "task-manual" })]
+    });
+    if (taskSnapshot?.kind !== "task") throw new Error("Expected Task snapshot.");
+    expect(taskSnapshot.relations[0]).not.toHaveProperty("origin");
+    expect(eventSnapshot).toMatchObject({ kind: "event", relations: [] });
   });
 
   it("fails closed when an experimental semantic relation cannot be interpreted safely", () => {

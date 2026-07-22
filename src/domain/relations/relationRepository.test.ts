@@ -3,8 +3,10 @@ import { createInitialState } from "../../data/seed";
 import type { DashboardState, Note, ReadingItem } from "../../types";
 import { materialDocumentId, noteDocumentId } from "../documents/documentContract";
 import { addUniversalObject, createUniversalObject, type ObjectRelation } from "../objects/objectGraph";
+import { legacyObjectReference } from "../objects/legacyAdapter";
 import {
   addRelationToState,
+  captureRelationsForEndpointSet,
   captureRelationsForDeletion,
   liveRelationEndpointIds,
   purgeRelationsForEndpoints,
@@ -29,6 +31,11 @@ function stateFixture(): DashboardState {
   const state = createInitialState();
   state.notes = [note("note-a"), note("note-b")];
   state.readingItems = [material("material")];
+  state.events = [{
+    id: "event-a", title: "Event", startAt: now, endAt: "2026-07-22T10:00:00.000Z",
+    kind: "meeting", source: "local", taskId: state.tasks[0].id, notes: "", locked: true,
+    createdAt: now, updatedAt: now
+  }];
   state.objectGraph = addUniversalObject(
     addUniversalObject(state.objectGraph, createUniversalObject({ id: "native-a", roles: ["document"], title: "A" }, { now })),
     createUniversalObject({ id: "native-b", roles: ["document"], title: "B" }, { now })
@@ -85,6 +92,20 @@ describe("mixed relation application boundary", () => {
     expect(ids.has(materialDocumentId("material"))).toBe(true);
     expect(ids.has("legacy:v12:note:not-real")).toBe(false);
   });
+
+  it("accepts Task, Event and LifeArea semantic endpoints", () => {
+    let state = stateFixture();
+    const endpoints = [
+      legacyObjectReference("task", state.tasks[0].id),
+      legacyObjectReference("event", state.events[0].id),
+      legacyObjectReference("area", state.lifeAreas[0].id)
+    ];
+    endpoints.forEach((endpoint, index) => {
+      const result = add(state, `legacy-${index}`, "native-a", endpoint);
+      expect(result.result.status).toBe("accepted");
+      state = result.state;
+    });
+  });
 });
 
 describe("atomic relation deletion and recovery", () => {
@@ -104,6 +125,28 @@ describe("atomic relation deletion and recovery", () => {
   it("captures incoming and outgoing Note relations and leaves no dangling live relation", () => {
     const captured = captureRelationsForDeletion(mixedState(), noteDocumentId("note-a"));
     expect(captured.relations.map((relation) => relation.id).sort()).toEqual(["incoming", "outgoing"]);
+    expect(captured.state.objectGraph.relations).toEqual([]);
+  });
+
+  it("captures a multi-endpoint Task/Event set atomically without duplicating their shared relation", () => {
+    let state = stateFixture();
+    const taskId = legacyObjectReference("task", state.tasks[0].id);
+    const eventId = legacyObjectReference("event", state.events[0].id);
+    for (const [id, fromId, toId] of [
+      ["task-in", "native-a", taskId],
+      ["task-out", taskId, "native-b"],
+      ["task-event", taskId, eventId],
+      ["event-out", eventId, "native-a"]
+    ] as const) {
+      const result = add(state, id, fromId, toId);
+      if (result.result.status !== "accepted") throw new Error("fixture failed");
+      state = result.state;
+    }
+    const captured = captureRelationsForEndpointSet(state, [taskId, eventId]);
+    expect(captured.relations.map((relation) => relation.id).sort()).toEqual([
+      "event-out", "task-event", "task-in", "task-out"
+    ]);
+    expect(new Set(captured.relations.map((relation) => relation.id)).size).toBe(4);
     expect(captured.state.objectGraph.relations).toEqual([]);
   });
 

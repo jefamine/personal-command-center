@@ -443,9 +443,9 @@ export interface ActivityEntry {
 export type RecoverableEntityKind = "task" | "note" | "event" | "object";
 
 export type RecoverableEntitySnapshot =
-  | { kind: "task"; task: Task; linkedEvents: CalendarEvent[] }
+  | { kind: "task"; task: Task; linkedEvents: CalendarEvent[]; relations: ObjectRelation[] }
   | { kind: "note"; note: Note; relations: ObjectRelation[] }
-  | { kind: "event"; event: CalendarEvent }
+  | { kind: "event"; event: CalendarEvent; relations: ObjectRelation[] }
   | { kind: "object"; object: UniversalObject; relations: ObjectRelation[] };
 
 export type PendingRelationReason =

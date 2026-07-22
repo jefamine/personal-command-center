@@ -31,13 +31,15 @@ import {
 import { materialDocumentId, noteDocumentId } from "../domain/documents/documentContract";
 import {
   addRelationToState,
+  captureRelationsForEndpointSet,
   captureRelationsForDeletion,
   purgeRelationsForEndpoints,
   removeRelationFromState,
   restoreCapturedRelations,
   retryPendingRelations,
-  trashEntryRelationEndpointId
+  trashEntryRelationEndpointIds
 } from "../domain/relations/relationRepository";
+import { legacyObjectReference } from "../domain/objects/legacyAdapter";
 import { lifeAreaTitleKey } from "../domain/life/lifeAreas";
 import {
   appendEntityRevision,
@@ -221,6 +223,147 @@ function withActivity(
     { id: crypto.randomUUID(), type, entityId, timestamp: new Date().toISOString(), metadata },
     ...current.activityLog
   ].slice(0, 500);
+}
+
+/** State transition used by the public removeTask command. */
+export function deleteTaskFromDashboardState(current: DashboardState, id: string): DashboardState {
+  const task = current.tasks.find((entry) => entry.id === id);
+  if (!task) return current;
+  const linkedEvents = current.events.filter((event) => event.taskId === id);
+  const captured = captureRelationsForEndpointSet(current, [
+    legacyObjectReference("task", task.id),
+    ...linkedEvents.map((event) => legacyObjectReference("event", event.id))
+  ]);
+  const trashed = taskTrashEntry(task, linkedEvents, [...captured.relations]);
+  return {
+    ...captured.state,
+    tasks: captured.state.tasks.filter((entry) => entry.id !== id),
+    events: captured.state.events.filter((event) => event.taskId !== id),
+    trash: [trashed, ...captured.state.trash],
+    activityLog: withActivity(current, "entity_trashed", id, { kind: "task" })
+  };
+}
+
+/** State transition used by the public removeEvent command. */
+export function deleteEventFromDashboardState(current: DashboardState, id: string): DashboardState {
+  const event = current.events.find((entry) => entry.id === id);
+  if (!event) return current;
+  const captured = captureRelationsForDeletion(current, legacyObjectReference("event", event.id));
+  const trashed = eventTrashEntry(event, [...captured.relations]);
+  return {
+    ...captured.state,
+    events: captured.state.events.filter((entry) => entry.id !== id),
+    trash: [trashed, ...captured.state.trash],
+    activityLog: withActivity(current, "entity_trashed", id, { kind: "event" })
+  };
+}
+
+/** State transition used by the permanently destructive removeLifeArea command. */
+export function deleteLifeAreaFromDashboardState(
+  current: DashboardState,
+  id: string,
+  updatedAt = new Date().toISOString()
+): DashboardState {
+  if (!current.lifeAreas.some((area) => area.id === id)) return current;
+  const affectedProjects = current.projects.filter((project) => project.areaId === id).length;
+  const withoutRelations = purgeRelationsForEndpoints(current, [legacyObjectReference("area", id)]);
+  return {
+    ...withoutRelations,
+    lifeAreas: withoutRelations.lifeAreas
+      .filter((area) => area.id !== id)
+      .map((area, order) => ({ ...area, order })),
+    projects: withoutRelations.projects.map((project) => project.areaId === id
+      ? { ...project, areaId: null, area: "Без области", updatedAt }
+      : project),
+    activityLog: withActivity(current, "life_area_removed", id, { affectedProjects })
+  };
+}
+
+/** Restores one tombstone and then retries all semantic relations that became viable. */
+export function restoreTrashEntryInDashboardState(
+  current: DashboardState,
+  id: string
+): { readonly state: DashboardState; readonly restored: boolean } {
+  const entry = current.trash.find((candidate) => candidate.id === id);
+  if (!entry) return { state: current, restored: false };
+  const snapshot = entry.snapshot;
+  let next = current;
+
+  if (snapshot.kind === "task") {
+    if (current.tasks.some((task) => task.id === snapshot.task.id)) {
+      return { state: current, restored: false };
+    }
+    const eventIds = new Set(current.events.map((event) => event.id));
+    next = {
+      ...current,
+      tasks: [snapshot.task, ...current.tasks],
+      events: [
+        ...snapshot.linkedEvents.filter((event) => !eventIds.has(event.id)),
+        ...current.events
+      ]
+    };
+    next = restoreCapturedRelations(next, snapshot.relations).state;
+    next = retryPendingRelations(next).state;
+  } else if (snapshot.kind === "note") {
+    if (current.notes.some((note) => note.id === snapshot.note.id)) {
+      return { state: current, restored: false };
+    }
+    next = { ...current, notes: [snapshot.note, ...current.notes] };
+    next = restoreCapturedRelations(next, snapshot.relations).state;
+    next = retryPendingRelations(next).state;
+  } else if (snapshot.kind === "event") {
+    if (current.events.some((event) => event.id === snapshot.event.id)) {
+      return { state: current, restored: false };
+    }
+    next = { ...current, events: [snapshot.event, ...current.events] };
+    next = restoreCapturedRelations(next, snapshot.relations).state;
+    next = retryPendingRelations(next).state;
+  } else {
+    if (current.objectGraph.objects.some((object) => object.id === snapshot.object.id)) {
+      return { state: current, restored: false };
+    }
+    const objectGraph = addGraphObject(current.objectGraph, {
+      ...snapshot.object,
+      status: snapshot.object.status === "deleted" ? "active" : snapshot.object.status,
+      deletedAt: null
+    });
+    next = { ...current, objectGraph };
+    next = restoreCapturedRelations(next, snapshot.relations).state;
+    next = retryPendingRelations(next).state;
+  }
+
+  return {
+    restored: true,
+    state: {
+      ...next,
+      trash: current.trash.filter((candidate) => candidate.id !== id),
+      activityLog: withActivity(current, "entity_restored", entry.entityId, {
+        kind: entry.entityKind
+      })
+    }
+  };
+}
+
+export function purgeTrashEntryFromDashboardState(current: DashboardState, id: string): DashboardState {
+  const entry = current.trash.find((candidate) => candidate.id === id);
+  if (!entry) return current;
+  const withoutRelations = purgeRelationsForEndpoints(current, trashEntryRelationEndpointIds(entry));
+  return {
+    ...withoutRelations,
+    trash: withoutRelations.trash.filter((candidate) => candidate.id !== id),
+    activityLog: withActivity(current, "trash_purged", entry.entityId, {
+      kind: entry.entityKind
+    })
+  };
+}
+
+export function emptyTrashFromDashboardState(current: DashboardState): DashboardState {
+  if (!current.trash.length) return current;
+  const withoutRelations = purgeRelationsForEndpoints(
+    current,
+    current.trash.flatMap(trashEntryRelationEndpointIds)
+  );
+  return { ...withoutRelations, trash: [] };
 }
 
 function appendMarkdownSection(body: string, section: string): string {
@@ -668,19 +811,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const removeTask = useCallback(
     (id: string) => {
-      mutate((current) => {
-        const task = current.tasks.find((entry) => entry.id === id);
-        if (!task) return current;
-        const linkedEvents = current.events.filter((event) => event.taskId === id);
-        const trashed = taskTrashEntry(task, linkedEvents);
-        return {
-          ...current,
-          tasks: current.tasks.filter((entry) => entry.id !== id),
-          events: current.events.filter((event) => event.taskId !== id),
-          trash: [trashed, ...current.trash],
-          activityLog: withActivity(current, "entity_trashed", id, { kind: "task" })
-        };
-      });
+      mutate((current) => deleteTaskFromDashboardState(current, id));
     },
     [mutate]
   );
@@ -1486,19 +1617,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (id: string) => {
       if (!state.lifeAreas.some((area) => area.id === id)) return false;
       const now = new Date().toISOString();
-      mutate((current) => {
-        const affectedProjects = current.projects.filter((project) => project.areaId === id).length;
-        return {
-          ...current,
-          lifeAreas: current.lifeAreas
-            .filter((area) => area.id !== id)
-            .map((area, order) => ({ ...area, order })),
-          projects: current.projects.map((project) => project.areaId === id
-            ? { ...project, areaId: null, area: "Без области", updatedAt: now }
-            : project),
-          activityLog: withActivity(current, "life_area_removed", id, { affectedProjects })
-        };
-      });
+      mutate((current) => deleteLifeAreaFromDashboardState(current, id, now));
       return true;
     },
     [mutate, state.lifeAreas]
@@ -1567,17 +1686,7 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const removeEvent = useCallback(
     (id: string) => {
-      mutate((current) => {
-        const event = current.events.find((entry) => entry.id === id);
-        if (!event) return current;
-        const trashed = eventTrashEntry(event);
-        return {
-          ...current,
-          events: current.events.filter((entry) => entry.id !== id),
-          trash: [trashed, ...current.trash],
-          activityLog: withActivity(current, "entity_trashed", id, { kind: "event" })
-        };
-      });
+      mutate((current) => deleteEventFromDashboardState(current, id));
     },
     [mutate]
   );
@@ -1751,53 +1860,9 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     (id: string) => {
       let restored = false;
       mutate((current) => {
-        const entry = current.trash.find((candidate) => candidate.id === id);
-        if (!entry) return current;
-        const snapshot = entry.snapshot;
-        let next = current;
-
-        if (snapshot.kind === "task") {
-          if (current.tasks.some((task) => task.id === snapshot.task.id)) return current;
-          const eventIds = new Set(current.events.map((event) => event.id));
-          next = {
-            ...current,
-            tasks: [snapshot.task, ...current.tasks],
-            events: [
-              ...snapshot.linkedEvents.filter((event) => !eventIds.has(event.id)),
-              ...current.events
-            ]
-          };
-        } else if (snapshot.kind === "note") {
-          if (current.notes.some((note) => note.id === snapshot.note.id)) return current;
-          next = { ...current, notes: [snapshot.note, ...current.notes] };
-          next = restoreCapturedRelations(next, snapshot.relations).state;
-          next = retryPendingRelations(next).state;
-        } else if (snapshot.kind === "event") {
-          if (current.events.some((event) => event.id === snapshot.event.id)) return current;
-          next = { ...current, events: [snapshot.event, ...current.events] };
-        } else {
-          if (current.objectGraph.objects.some((object) => object.id === snapshot.object.id)) return current;
-          const objectGraph = addGraphObject(current.objectGraph, {
-            ...snapshot.object,
-            status: snapshot.object.status === "deleted" ? "active" : snapshot.object.status,
-            deletedAt: null
-          });
-          next = {
-            ...current,
-            objectGraph
-          };
-          next = restoreCapturedRelations(next, snapshot.relations).state;
-          next = retryPendingRelations(next).state;
-        }
-
-        restored = true;
-        return {
-          ...next,
-          trash: current.trash.filter((candidate) => candidate.id !== id),
-          activityLog: withActivity(current, "entity_restored", entry.entityId, {
-            kind: entry.entityKind
-          })
-        };
+        const result = restoreTrashEntryInDashboardState(current, id);
+        restored = result.restored;
+        return result.state;
       });
       return restored;
     },
@@ -1806,31 +1871,13 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const purgeTrashEntry = useCallback(
     (id: string) => {
-      mutate((current) => {
-        const entry = current.trash.find((candidate) => candidate.id === id);
-        if (!entry) return current;
-        const withoutRelations = purgeRelationsForEndpoints(current, [trashEntryRelationEndpointId(entry)]);
-        return {
-          ...withoutRelations,
-          trash: withoutRelations.trash.filter((candidate) => candidate.id !== id),
-          activityLog: withActivity(current, "trash_purged", entry.entityId, {
-            kind: entry.entityKind
-          })
-        };
-      });
+      mutate((current) => purgeTrashEntryFromDashboardState(current, id));
     },
     [mutate]
   );
 
   const emptyTrash = useCallback(() => {
-    mutate((current) => {
-      if (!current.trash.length) return current;
-      const withoutRelations = purgeRelationsForEndpoints(
-        current,
-        current.trash.map(trashEntryRelationEndpointId)
-      );
-      return { ...withoutRelations, trash: [] };
-    });
+    mutate(emptyTrashFromDashboardState);
   }, [mutate]);
 
   const restoreRevision = useCallback(
