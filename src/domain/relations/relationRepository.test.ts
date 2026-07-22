@@ -5,6 +5,12 @@ import { materialDocumentId, noteDocumentId } from "../documents/documentContrac
 import { addUniversalObject, createUniversalObject, type ObjectRelation } from "../objects/objectGraph";
 import { legacyObjectReference } from "../objects/legacyAdapter";
 import {
+  eventTrashEntry,
+  noteTrashEntry,
+  objectTrashEntry,
+  taskTrashEntry
+} from "../safety/dataSafety";
+import {
   addRelationToState,
   captureRelationsForEndpointSet,
   captureRelationsForDeletion,
@@ -241,5 +247,74 @@ describe("atomic relation deletion and recovery", () => {
     };
     const purged = purgeRelationsForEndpoints(state, [noteDocumentId("note-a"), "native-b"]);
     expect(purged.pendingRelations.map((entry) => entry.relation.id)).toEqual(["keep"]);
+  });
+
+  it("purges destroyed endpoints from Task, Event, Note and Object recovery snapshots immutably", () => {
+    const state = stateFixture();
+    const task = state.tasks[0];
+    const event = state.events[0];
+    const native = state.objectGraph.objects.find((object) => object.id === "native-a")!;
+    const destroyed = materialDocumentId("material");
+    const relation = (id: string, fromId: string, toId: string): ObjectRelation => ({
+      id, kind: "links", fromId, toId, order: 0, createdAt: now
+    });
+    const taskId = legacyObjectReference("task", task.id);
+    const eventId = legacyObjectReference("event", event.id);
+    const snapshots = [
+      taskTrashEntry(task, [event], [relation("task-cut", taskId, destroyed)], now, "task-trash"),
+      eventTrashEntry(event, [relation("event-cut", eventId, destroyed)], now, "event-trash"),
+      noteTrashEntry(
+        state.notes[0], now, "note-trash",
+        [
+          relation("note-keep-first", noteDocumentId(state.notes[0].id), "native-a"),
+          relation("note-cut", noteDocumentId(state.notes[0].id), destroyed),
+          relation("note-keep-second", noteDocumentId(state.notes[0].id), "native-b")
+        ]
+      ),
+      objectTrashEntry(native, [relation("object-cut", native.id, destroyed)], now, "object-trash"),
+      noteTrashEntry(
+        state.notes[1], now, "unrelated-trash",
+        [
+          relation("keep-first", noteDocumentId(state.notes[1].id), "native-a"),
+          relation("keep-second", noteDocumentId(state.notes[1].id), "native-b")
+        ]
+      )
+    ];
+    const input: DashboardState = { ...state, trash: snapshots };
+    const before = structuredClone(input);
+    const nestedArrays = input.trash.map((entry) => entry.snapshot.relations);
+
+    const purged = purgeRelationsForEndpoints(input, [destroyed]);
+
+    expect(purged.trash[0].snapshot.relations).toEqual([]);
+    expect(purged.trash[1].snapshot.relations).toEqual([]);
+    expect(purged.trash[2].snapshot.relations.map((entry) => entry.id))
+      .toEqual(["note-keep-first", "note-keep-second"]);
+    expect(purged.trash[3].snapshot.relations).toEqual([]);
+    expect(purged.trash[4].snapshot.relations.map((entry) => entry.id))
+      .toEqual(["keep-first", "keep-second"]);
+    expect(purged.trash[4]).toBe(input.trash[4]);
+    expect(input).toEqual(before);
+    expect(input.trash.map((entry) => entry.snapshot.relations)).toEqual(nestedArrays);
+    expect(purged.trash[0].snapshot.relations).not.toBe(nestedArrays[0]);
+  });
+
+  it("removes a relation between two endpoints owned by one Task tombstone", () => {
+    const state = stateFixture();
+    const task = state.tasks[0];
+    const event = state.events[0];
+    const taskId = legacyObjectReference("task", task.id);
+    const eventId = legacyObjectReference("event", event.id);
+    const relation: ObjectRelation = {
+      id: "inside-task", kind: "links", fromId: taskId, toId: eventId,
+      order: 0, createdAt: now
+    };
+    const input: DashboardState = {
+      ...state,
+      trash: [taskTrashEntry(task, [event], [relation], now, "task-trash")]
+    };
+    const purged = purgeRelationsForEndpoints(input, [taskId, eventId]);
+    expect(purged.trash[0].snapshot.relations).toEqual([]);
+    expect(input.trash[0].snapshot.relations).toEqual([relation]);
   });
 });

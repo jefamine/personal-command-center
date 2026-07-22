@@ -178,24 +178,30 @@ export function retryPendingRelations(state: DashboardState): RestoredRelations 
   );
 }
 
-/** Permanently removes semantic relations and recovery entries for destroyed endpoints. */
+/** Permanently removes semantic relations from live, pending and tombstone recovery stores. */
 export function purgeRelationsForEndpoints(
   state: DashboardState,
   endpointIds: Iterable<string>
 ): DashboardState {
   const removed = new Set(endpointIds);
   if (!removed.size) return state;
+  const survivesPurge = (relation: ObjectRelation) =>
+    !removed.has(relation.fromId) && !removed.has(relation.toId);
   return {
     ...state,
     objectGraph: {
       ...state.objectGraph,
-      relations: state.objectGraph.relations.filter((relation) =>
-        !removed.has(relation.fromId) && !removed.has(relation.toId)
-      )
+      relations: state.objectGraph.relations.filter(survivesPurge)
     },
-    pendingRelations: state.pendingRelations.filter((entry) =>
-      !removed.has(entry.relation.fromId) && !removed.has(entry.relation.toId)
-    )
+    pendingRelations: state.pendingRelations.filter((entry) => survivesPurge(entry.relation)),
+    trash: state.trash.map((entry) => {
+      const relations = entry.snapshot.relations.filter(survivesPurge);
+      if (relations.length === entry.snapshot.relations.length) return entry;
+      return {
+        ...entry,
+        snapshot: { ...entry.snapshot, relations }
+      } as TrashEntry;
+    })
   };
 }
 

@@ -6,6 +6,7 @@ import {
   type ObjectRelation
 } from "../domain/objects/objectGraph";
 import { legacyObjectReference } from "../domain/objects/legacyAdapter";
+import { objectTrashEntry } from "../domain/safety/dataSafety";
 import {
   addRelationToState,
   assertPersistedRelationEndpoints
@@ -167,8 +168,22 @@ describe("DashboardContext legacy semantic lifecycle commands", () => {
     const taskId = legacyObjectReference("task", built.state.tasks[0].id);
     const eventId = legacyObjectReference("event", built.event.id);
     const deleted = deleteTaskFromDashboardState(built.state, built.state.tasks[0].id);
+    const hiddenRelation: ObjectRelation = {
+      id: "hidden-recovery", kind: "links", fromId: taskId, toId: eventId,
+      order: 0, createdAt: now
+    };
     const stateWithPending: DashboardState = {
       ...deleted,
+      objectGraph: {
+        ...deleted.objectGraph,
+        relations: [{
+          id: "dangling-live", kind: "links", fromId: taskId, toId: "native-a",
+          order: 0, createdAt: now
+        }]
+      },
+      trash: deleted.trash.map((entry) => entry.snapshot.kind === "task"
+        ? { ...entry, snapshot: { ...entry.snapshot, relations: [hiddenRelation] } }
+        : entry),
       pendingRelations: [
         pending({ id: "task-pending", kind: "links", fromId: taskId, toId: "missing", order: 0, createdAt: now }),
         pending({ id: "event-pending", kind: "links", fromId: eventId, toId: "missing", order: 0, createdAt: now }),
@@ -178,10 +193,63 @@ describe("DashboardContext legacy semantic lifecycle commands", () => {
 
     const purged = purgeTrashEntryFromDashboardState(stateWithPending, stateWithPending.trash[0].id);
     expect(purged.pendingRelations.map((entry) => entry.relation.id)).toEqual(["unrelated"]);
+    expect(purged.objectGraph.relations).toEqual([]);
     expect(purged.trash).toEqual([]);
 
     const emptied = emptyTrashFromDashboardState(stateWithPending);
     expect(emptied.pendingRelations.map((entry) => entry.relation.id)).toEqual(["unrelated"]);
+    expect(emptied.objectGraph.relations).toEqual([]);
     expect(emptied.trash).toEqual([]);
+  });
+
+  it("purging Event B removes Task A recovery relation and prevents an eternal pending entry", () => {
+    const built = fixture();
+    const task = built.state.tasks[0];
+    const standaloneEvent = { ...built.event, id: "standalone-event", taskId: null };
+    const taskId = legacyObjectReference("task", task.id);
+    const eventId = legacyObjectReference("event", standaloneEvent.id);
+    let state: DashboardState = { ...built.state, events: [standaloneEvent] };
+    state = add(state, { id: "task-to-event", kind: "links", fromId: taskId, toId: eventId });
+
+    const taskDeleted = deleteTaskFromDashboardState(state, task.id);
+    const taskTrashId = taskDeleted.trash.find((entry) => entry.snapshot.kind === "task")!.id;
+    const taskSnapshotBefore = taskDeleted.trash.find((entry) => entry.id === taskTrashId)!.snapshot;
+    if (taskSnapshotBefore.kind !== "task") throw new Error("Expected Task snapshot.");
+    expect(taskSnapshotBefore.relations.map((relation) => relation.id)).toEqual(["task-to-event"]);
+
+    const eventDeleted = deleteEventFromDashboardState(taskDeleted, standaloneEvent.id);
+    const eventTrashId = eventDeleted.trash.find((entry) => entry.snapshot.kind === "event")!.id;
+    const eventPurged = purgeTrashEntryFromDashboardState(eventDeleted, eventTrashId);
+    const taskSnapshotAfter = eventPurged.trash.find((entry) => entry.id === taskTrashId)!.snapshot;
+    if (taskSnapshotAfter.kind !== "task") throw new Error("Expected Task snapshot.");
+    expect(taskSnapshotAfter.relations).toEqual([]);
+
+    const restored = restoreTrashEntryInDashboardState(eventPurged, taskTrashId);
+    expect(restored.restored).toBe(true);
+    expect(restored.state.objectGraph.relations).toEqual([]);
+    expect(restored.state.pendingRelations).toEqual([]);
+  });
+
+  it("permanent LifeArea deletion removes its relation from an Object tombstone", () => {
+    const built = fixture();
+    const area = built.state.lifeAreas[0];
+    const areaId = legacyObjectReference("area", area.id);
+    const object = built.state.objectGraph.objects.find((entry) => entry.id === "native-a")!;
+    const relation: ObjectRelation = {
+      id: "object-area", kind: "links", fromId: object.id, toId: areaId,
+      order: 0, createdAt: now
+    };
+    const state: DashboardState = {
+      ...built.state,
+      objectGraph: {
+        ...built.state.objectGraph,
+        objects: built.state.objectGraph.objects.filter((entry) => entry.id !== object.id)
+      },
+      trash: [objectTrashEntry(object, [relation], now, "object-trash")]
+    };
+
+    const deleted = deleteLifeAreaFromDashboardState(state, area.id, now);
+    expect(deleted.trash[0].snapshot.relations).toEqual([]);
+    expect(deleted.objectGraph.objects.some((entry) => entry.id === "native-b")).toBe(true);
   });
 });
